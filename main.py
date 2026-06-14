@@ -3,13 +3,14 @@ silverchrome — pinch to turn invisible. Live on your webcam.
 
     python main.py
 
-How it works (layered curtain):
+How it works (two layers):
     1. Press  c  while you are OUT of frame to capture the empty room (required).
     2. Step back in. You look normal.
-    3. Pinch (thumb + index on EITHER hand) -> a liquid-chrome curtain sweeps
-       over the real you; once it fully covers, the layer underneath swaps to the
-       captured empty room, then the chrome recedes and you're gone. Pinch again
-       and the chrome sweeps back, swaps the room for the real you, and lifts.
+    3. Pinch (thumb + index on EITHER hand) -> liquid chrome grows over the real
+       you; once it covers you, the WHOLE background dissolves from live camera
+       into the empty-room capture. You stay as a chrome figure standing in the
+       captured room, so a lagging mask never exposes your real body. Pinch again
+       to dissolve the room back to live and lift the chrome.
 
 Controls:
     c         capture background plate (do this once, out of frame; averaged)
@@ -50,7 +51,7 @@ def make_noise(h, w, seed=7):
 CAM_INDEX = 0
 WIDTH, HEIGHT = 1280, 720
 OUT_DIR = Path(__file__).resolve().parent / "output"
-TRANSITION_SECONDS = 2.0     # full chrome sweep: cover (0..0.5) then uncover (0.5..1)
+TRANSITION_SECONDS = 2.0     # chrome grows (first half) then base dissolves (second half)
 
 
 def reveal_field(cov, noise):
@@ -111,12 +112,12 @@ def main():
     recording = False
     writer = None
 
-    # curtain state machine
-    invisible = False           # settled state: are you currently gone?
-    transitioning = False
-    t_dir = 0                   # +1 going invisible, -1 coming back
-    tp = 0.0                    # transition progress 0..1
-    pending_toggle = False      # a pinch/SPACE waiting to start a transition
+    # transition state. tp in [0,1]: 0 = plain live you, 1 = settled chrome figure
+    # over the captured empty room. First half (0..0.5) grows the chrome over the
+    # live you; second half (0.5..1) dissolves the whole base live->capture.
+    chrome_on = False           # toggle target
+    tp = 0.0                    # animated progress toward chrome_on
+    pending_toggle = False      # a pinch/SPACE waiting to be applied
     frame_i = 0
 
     matte_smooth = 1.0          # temporal EMA on the matte (1.0 = off, no lag/trails)
@@ -155,38 +156,26 @@ def main():
 
         if pending_toggle:
             pending_toggle = False
-            if not transitioning:
-                going_invisible = not invisible
-                if going_invisible and not ren.has_plate:
-                    print("capture the empty room first: step out and press c.")
-                else:
-                    transitioning = True
-                    t_dir = 1 if going_invisible else -1
-                    tp = 0.0
+            if not chrome_on and not ren.has_plate:
+                print("capture the empty room first: step out and press c.")
+            else:
+                chrome_on = not chrome_on        # reversible mid-transition
 
-        # advance the curtain. cover rises 0->1 (chrome covers the real you),
-        # the layer underneath swaps at the peak, then cover falls 1->0.
-        if transitioning:
-            tp += dt / TRANSITION_SECONDS
-            if tp >= 1.0:
-                tp = 1.0
-                transitioning = False
-                invisible = (t_dir > 0)
-            tri = (tp * 2.0) if tp < 0.5 else ((1.0 - tp) * 2.0)
-            cov = tri * tri * (3.0 - 2.0 * tri)      # smoothstep ease 0->1->0
-            past_peak = tp >= 0.5
-            if t_dir > 0:                              # going invisible
-                base_plate = 1.0 if past_peak else 0.0
-            else:                                      # coming back
-                base_plate = 0.0 if past_peak else 1.0
-        else:
-            cov = 0.0
-            base_plate = 1.0 if invisible else 0.0
+        # animate tp toward the target. Two phases, each ~half the time:
+        #   tp 0.0..0.5  chrome grows over the LIVE you   (base still live)
+        #   tp 0.5..1.0  base dissolves live -> capture   (chrome stays full)
+        step = dt / TRANSITION_SECONDS
+        tp += float(np.clip((1.0 if chrome_on else 0.0) - tp, -step, step))
+        tp = float(np.clip(tp, 0.0, 1.0))
+
+        cov_t = np.clip(tp / 0.5, 0.0, 1.0)              # chrome coverage phase
+        base_t = np.clip((tp - 0.5) / 0.5, 0.0, 1.0)     # base dissolve phase
+        cov = float(cov_t * cov_t * (3.0 - 2.0 * cov_t))         # smoothstep
+        base_plate = float(base_t * base_t * (3.0 - 2.0 * base_t))
         ren.params["u_base_plate"] = base_plate
 
-        # Run the matte while a transition is in flight or while you're invisible
-        # (the empty-room hole must keep tracking you). Skip it when fully visible.
-        active = transitioning or invisible
+        # Run the matte whenever any chrome is on screen so the figure tracks you.
+        active = tp > 0.001
         if active:
             matter.submit(shared)
         body = matter.get()
@@ -201,13 +190,12 @@ def main():
                 body = matte_smooth * body + (1.0 - matte_smooth) * body_prev
             body_prev = body
 
-        region = body if active else np.zeros((h, w), np.float32)
         if cov <= 0.001:
             cover = np.zeros((h, w), np.float32)
         else:
-            cover = region * reveal_field(cov, noise)
+            cover = body * reveal_field(cov, noise)
         height = height_from_mask(cover)
-        out_rgb = ren.render(frame_rgb, region, cover, height)
+        out_rgb = ren.render(frame_rgb, cover, height)
         out = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
 
         if show_matte:                     # debug: see exactly what RVM selects

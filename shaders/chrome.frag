@@ -4,15 +4,14 @@ in vec2 v_uv;
 out vec4 frag;
 
 uniform sampler2D u_frame;    // webcam (rgb) — the live "real you" layer
-uniform sampler2D u_plate;    // clean background plate (rgb) — room without you
-uniform sampler2D u_mask;     // chrome curtain coverage (r) — where chrome shows
-uniform sampler2D u_region;   // person silhouette (r) — the whole effect region
+uniform sampler2D u_plate;    // empty-room capture (rgb) — the layer we dissolve TO
+uniform sampler2D u_mask;     // chrome coverage (r) — where/how much chrome shows
 uniform sampler2D u_height;   // silhouette dome (r) -> overall body curvature
 uniform sampler2D u_matcap;   // chrome sphere -> the REFLECTION (environment)
 
 uniform vec2  u_texel;
 uniform float u_time;
-uniform float u_base_plate;   // 0 = live you under the chrome, 1 = empty-room plate
+uniform float u_base_plate;   // full-frame base dissolve: 0 = live camera, 1 = capture
 uniform int   u_has_plate;
 uniform float u_flow_speed;   // how fast the liquid flows
 uniform float u_liquid_scale; // ripple size (bigger = finer ripples)
@@ -57,16 +56,13 @@ float surf(vec2 p, vec2 flow){
 void main(){
     vec2 uv = v_uv;
     vec3 live = frame(uv);                 // the live "real you" layer
-    float region = smoothstep(0.30, 0.55, texture(u_region, uv).r);
-    if (region < 0.004) { frag = vec4(live, 1.0); return; }
-
-    // the layer UNDER the chrome curtain: live you, or the empty-room plate
-    // once the swap has happened (hidden at the moment the chrome fully covers).
+    // BASE = whole-frame layer that dissolves live camera -> empty-room capture.
+    // Once it's the capture, a lagging chrome mask exposes empty room, not you.
     vec3 base = mix(live, texture(u_plate, clamp(uv, 0.0, 1.0)).rgb, u_base_plate);
 
-    float cover = clamp(texture(u_mask, uv).r, 0.0, 1.0);   // chrome curtain here
-    if (cover < 0.004) {                   // no chrome -> just show the base layer
-        frag = vec4(mix(live, base, region), 1.0);
+    float cover = clamp(texture(u_mask, uv).r, 0.0, 1.0);   // chrome over the body
+    if (cover < 0.004) {                   // no chrome here -> just the base layer
+        frag = vec4(base, 1.0);
         return;
     }
 
@@ -102,7 +98,6 @@ void main(){
     // specular sparkle where the surface tilts hard
     glass += smoothstep(0.6, 1.0, F) * u_rim * vec3(0.95, 0.98, 1.0);
 
-    // chrome curtain over the base layer, then the whole region over the live bg
-    vec3 person = mix(base, glass, cover);
-    frag = vec4(mix(live, person, region), 1.0);
+    // chrome figure composited over the base layer (live early, capture once set)
+    frag = vec4(mix(base, glass, cover), 1.0);
 }
