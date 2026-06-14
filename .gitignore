@@ -1,0 +1,15 @@
+# Auto-downloaded ML models (fetched on first run)
+assets/models/
+
+# Recordings
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
