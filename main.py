@@ -10,9 +10,10 @@ How it works:
        coverage slowly spreads across your whole body. Pinch again to reverse.
 
 Controls:
-    c         capture background plate (do this once, out of frame)
+    c         capture background plate (do this once, out of frame; averaged)
     SPACE     toggle coverage manually (same as a pinch)
     t / g     matte edge tightness (tighter / fuller)
+    a / s     matte temporal smoothing (steadier / more responsive)
     q / ESC   quit
     r         record on / off  (output/)
     90        chrome amount        ,. refraction
@@ -25,6 +26,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from capture import Camera
 from matte import BGMatte, ThreadedMatte, keep_significant, height_from_mask
 from chrome import ChromeRenderer
 from gesture import ThreadedPinch
@@ -49,15 +51,37 @@ OUT_DIR = Path(__file__).resolve().parent / "output"
 LEVEL_SECONDS = 1.4          # how long the coverage takes to spread in/out
 
 
+def capture_plate(cap, mirror, n=7):
+    """Average a short burst into a clean background plate.
+
+    A single frame carries sensor noise, which weakens the live-vs-plate
+    contrast the matte relies on. Averaging a handful of frames denoises the
+    plate, so the person separates more cleanly and accurately.
+    """
+    acc, got = None, 0
+    deadline = time.time() + 1.0
+    while got < n and time.time() < deadline:
+        ok, f = cap.read()
+        if not ok or f is None:
+            time.sleep(0.01)
+            continue
+        if mirror:
+            f = cv2.flip(f, 1)
+        acc = f.astype(np.float32) if acc is None else acc + f
+        got += 1
+        time.sleep(0.03)                 # space the reads out for distinct frames
+    if acc is None:
+        return None
+    return (acc / got).astype(np.uint8)
+
+
 def main():
-    cap = cv2.VideoCapture(CAM_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+    cap = Camera(CAM_INDEX, WIDTH, HEIGHT)
     if not cap.isOpened():
         raise SystemExit("Could not open webcam (index %d)." % CAM_INDEX)
 
     ok, frame = cap.read()
-    if not ok:
+    if not ok or frame is None:
         raise SystemExit("Webcam opened but returned no frame.")
     h, w = frame.shape[:2]
 
@@ -76,6 +100,9 @@ def main():
     target = 0.0                # where we're heading
     frame_i = 0
 
+    matte_smooth = 0.85         # temporal EMA on the matte (1.0 = off, no lag)
+    body_prev = None
+
     fps_t, fps_n, fps = time.time(), 0, 0.0
     last = time.time()
     print(__doc__)
@@ -84,6 +111,10 @@ def main():
         ok, frame = cap.read()
         if not ok:
             break
+        if frame is None:                # no fresh frame yet; stay responsive
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                break
+            continue
         if mirror:
             frame = cv2.flip(frame, 1)
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -123,6 +154,12 @@ def main():
             body = np.zeros((h, w), np.float32)
         else:
             body = keep_significant(body)
+            # temporal smoothing: steadies edges and stops near-threshold
+            # disconnected blobs from popping in/out. alpha=1.0 disables it.
+            if matte_smooth < 0.999 and body_prev is not None \
+                    and body_prev.shape == body.shape:
+                body = matte_smooth * body + (1.0 - matte_smooth) * body_prev
+            body_prev = body
 
         if level <= 0.001:
             mask = np.zeros((h, w), np.float32)
@@ -153,9 +190,10 @@ def main():
                 f"{plate}   {'REC' if recording else ''}",
                 f"chrome[{p['u_reflect']:.2f}]  refract[{p['u_refract']:.0f}]  "
                 f"ripple[{p['u_liquid_amp']:.2f}]  size[{p['u_liquid_scale']:.1f}]  "
-                f"flow[{p['u_flow_speed']:.2f}]  rim[{p['u_rim']:.2f}]",
-                "c plate  SPACE level  tg edge  v matte-view  q quit  r rec  90 chrome  "
-                ",. refract  -= ripple  ;' size  [] flow  kl chroma  fd rim  m mirror",
+                f"flow[{p['u_flow_speed']:.2f}]  rim[{p['u_rim']:.2f}]  "
+                f"smooth[{matte_smooth:.2f}]",
+                "c plate  SPACE level  tg edge  as smooth  v matte-view  q quit  r rec  "
+                "90 chrome  ,. refract  -= ripple  ;' size  [] flow  kl chroma  fd rim  m mirror",
             ]
             y = 26
             for ln in lines:
@@ -170,13 +208,22 @@ def main():
         if k in (ord("q"), 27):
             break
         elif k == ord("c"):
-            matter.set_background(frame.copy())   # BGMv2 background
-            ren.capture_plate(frame_rgb)          # refraction background
-            print("background plate captured.")
+            plate = capture_plate(cap, mirror)    # averaged, denoised plate
+            if plate is not None:
+                matter.set_background(plate)      # BGMv2 background
+                ren.capture_plate(cv2.cvtColor(plate, cv2.COLOR_BGR2RGB))
+                body_prev = None                  # drop smoothing history
+                print("background plate captured (averaged).")
+            else:
+                print("plate capture failed (no frames).")
         elif k == ord("g"):                 # looser matte edge (fuller)
             matter.thr = max(0.0, matter.thr - 0.05)
         elif k == ord("t"):                 # tighter matte edge
             matter.thr = min(0.9, matter.thr + 0.05)
+        elif k == ord("a"):                 # more temporal smoothing (steadier)
+            matte_smooth = max(0.2, matte_smooth - 0.05)
+        elif k == ord("s"):                 # less smoothing (more responsive)
+            matte_smooth = min(1.0, matte_smooth + 0.05)
         elif k == ord(" "):
             target = 0.0 if target > 0.5 else 1.0
         elif k == ord("h"):
@@ -218,9 +265,10 @@ def main():
             if recording:
                 OUT_DIR.mkdir(exist_ok=True)
                 fn = OUT_DIR / time.strftime("chrome_%Y%m%d_%H%M%S.mp4")
+                rec_fps = float(round(fps)) if fps > 1.0 else 30.0
                 writer = cv2.VideoWriter(
-                    str(fn), cv2.VideoWriter_fourcc(*"mp4v"), 24.0, (w, h))
-                print("recording ->", fn)
+                    str(fn), cv2.VideoWriter_fourcc(*"mp4v"), rec_fps, (w, h))
+                print("recording ->", fn, "@ %.0f fps" % rec_fps)
             elif writer is not None:
                 writer.release()
                 writer = None

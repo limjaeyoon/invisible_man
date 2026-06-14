@@ -19,11 +19,22 @@ Four stages, each its own file. Frame flows left to right:
 
 **The material** lives entirely in `assets/matcaps/` — a chrome sphere PNG. Swap the file → chrome becomes gold or oil-slick, no code change.
 
-## Knobs (planned hotkeys)
-- flow speed = how liquidy
-- displacement strength = how much it ripples
-- material = cycle matcap images
-- background = real / black / custom
+## Performance & tracking
+
+Built for low latency and accurate rotoscoping:
+- **Threaded capture** (`capture.py`) — a background grabber always serves the
+  freshest frame; MJPG + a 1-frame driver buffer avoid stale, queued images.
+- **Threaded matte & hand detection** — segmentation and pinch detection each
+  run on their own worker thread, so neither stalls rendering. Hand detection
+  runs on a downscaled frame (the pinch metric is resolution-invariant).
+- **Idle skip** — matte inference is skipped while the effect is fully off.
+- **Disconnected parts kept** — the matte keeps every sizeable region, not just
+  the largest blob, so a hand raised into a head-and-shoulders shot (a separate
+  island from the torso) still gets the effect.
+- **Averaged background plate** — pressing `c` denoises by averaging a short
+  burst, sharpening the live-vs-plate contrast the matte depends on.
+- **Temporal smoothing** (`a`/`s`) — optional EMA steadies edges and stops
+  near-threshold blobs from flickering; set to 1.0 for zero added lag.
 
 ## Status
-Scaffolding. Build in progress.
+Working. Real-time webcam effect with the pipeline above.
