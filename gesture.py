@@ -9,6 +9,8 @@ Robustness comes from three ideas (not a fixed distance threshold):
 Uses MediaPipe Tasks HandLandmarker (works on builds without mp.solutions).
 """
 import math
+import threading
+import time
 import urllib.request
 from pathlib import Path
 import cv2
@@ -32,6 +34,11 @@ PINCH_CLOSING_DELTA_TH = 0.03
 PINCH_STABLE_FRAMES = 1
 FAST_PRESS_STABLE_FRAMES = 2
 COOLDOWN_SEC = 0.5
+
+# Hand detection is run on a downscaled frame: the pinch metric is a *ratio*
+# (thumb-index gap / hand size), so it's resolution-invariant — shrinking the
+# input only makes MediaPipe faster, it doesn't change the measurement.
+DETECT_W = 640
 
 
 def ema(prev, new, alpha):
@@ -116,6 +123,10 @@ class PinchDetector:
     def update(self, frame_bgr, now):
         """Detect hands; return True on a confirmed pinch-press this frame."""
         h, w = frame_bgr.shape[:2]
+        if w > DETECT_W:                              # cheaper detection, same ratio
+            s = DETECT_W / float(w)
+            frame_bgr = cv2.resize(frame_bgr, (DETECT_W, max(1, int(round(h * s)))))
+            h, w = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         img = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         res = self.hl.detect(img)
@@ -140,3 +151,53 @@ class PinchDetector:
             self.hl.close()
         except Exception:
             pass
+
+
+class ThreadedPinch:
+    """Run pinch detection on a worker thread so MediaPipe never stalls the
+    render loop.
+
+    The main loop `submit()`s the latest frame and `poll()`s for a press event;
+    detection happens in the background (MediaPipe releases the GIL during
+    inference, so it truly overlaps the matte/render work). Press events are
+    latched, so a pinch is never missed even if the main loop polls late.
+    """
+    def __init__(self, detector=None):
+        self.det = detector or PinchDetector()
+        self._lock = threading.Lock()
+        self._frame = None
+        self._now = 0.0
+        self._fired = False
+        self._run = True
+        self.t = threading.Thread(target=self._loop, daemon=True)
+        self.t.start()
+
+    def submit(self, frame_bgr, now):
+        with self._lock:
+            self._frame = frame_bgr
+            self._now = now
+
+    def poll(self):
+        """Return True once per detected pinch-press, then clear the latch."""
+        with self._lock:
+            fired, self._fired = self._fired, False
+        return fired
+
+    def _loop(self):
+        while self._run:
+            with self._lock:
+                f, now = self._frame, self._now
+                self._frame = None
+            if f is None:
+                time.sleep(0.003)
+                continue
+            try:
+                if self.det.update(f, now):
+                    with self._lock:
+                        self._fired = True
+            except Exception:
+                time.sleep(0.02)
+
+    def close(self):
+        self._run = False
+        self.det.close()

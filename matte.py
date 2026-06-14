@@ -96,16 +96,28 @@ class RVMatte:
             self.rec[k] = np.zeros((1, 1, 1, 1), np.float32)
 
 
-def keep_largest(pha):
-    """Keep only the largest connected blob (the person); drop stray pieces."""
+def keep_significant(pha, min_frac=0.0006):
+    """Keep the person *and* any sizeable disconnected parts, dropping only
+    small speckle noise.
+
+    The old version kept just the single largest blob, so a hand raised into a
+    head-and-shoulders shot — which reads as a separate island from the torso —
+    vanished. Here we keep every component whose area is at least `min_frac` of
+    the frame (a hand easily clears that), which preserves limbs that aren't
+    connected in-frame while still discarding tiny matte flicker.
+    """
+    h, w = pha.shape[:2]
     b = (pha > 0.4).astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(b)
     if n <= 1:
         return pha
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    largest = 1 + int(np.argmax(areas))           # the person (one blob)
-    keep = (lab == largest).astype(np.uint8)
-    keep = cv2.dilate(keep, np.ones((5, 5), np.uint8), 2).astype(np.float32)
+    areas = stats[1:, cv2.CC_STAT_AREA]           # skip label 0 (background)
+    floor = max(64.0, min_frac * h * w)
+    keep_ids = np.nonzero(areas >= floor)[0] + 1
+    if keep_ids.size == 0:                         # everything is tiny: keep top
+        keep_ids = np.array([1 + int(np.argmax(areas))])
+    keep = np.isin(lab, keep_ids).astype(np.uint8)
+    keep = cv2.dilate(keep, np.ones((5, 5), np.uint8), iterations=1).astype(np.float32)
     return pha * keep
 
 

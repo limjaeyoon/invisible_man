@@ -25,9 +25,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from matte import BGMatte, ThreadedMatte, keep_largest, height_from_mask
+from matte import BGMatte, ThreadedMatte, keep_significant, height_from_mask
 from chrome import ChromeRenderer
-from gesture import PinchDetector
+from gesture import ThreadedPinch
 
 
 def make_noise(h, w, seed=7):
@@ -62,7 +62,7 @@ def main():
     h, w = frame.shape[:2]
 
     matter = ThreadedMatte(BGMatte())
-    pinch = PinchDetector()
+    pinch = ThreadedPinch()
     ren = ChromeRenderer(w, h, matcap="chrome")
     noise = make_noise(h, w)
     show_matte = False          # 'v' debug: view the raw RVM matte
@@ -92,11 +92,17 @@ def main():
         dt = now - last
         last = now
 
-        # --- pinch press -> toggle matte-coverage target (AIRMPC detector) ---
+        # one copy shared by both worker threads (they only read it)
         frame_i += 1
-        if frame_i % 2 == 0:                 # check hands every other frame
-            if pinch.update(frame, now):
-                target = 0.0 if target > 0.5 else 1.0
+        shared = frame.copy()
+
+        # --- pinch press -> toggle matte-coverage target ---
+        # Detection runs on a background thread (see ThreadedPinch); we just
+        # hand it the latest frame and consume any press it has latched.
+        if frame_i % 2 == 0:                 # feed hands every other frame
+            pinch.submit(shared, now)
+        if pinch.poll():
+            target = 0.0 if target > 0.5 else 1.0
 
         # animate the coverage LEVEL toward target (slow spread in/out)
         step = dt / LEVEL_SECONDS
@@ -106,13 +112,17 @@ def main():
         # effect is fully applied wherever the matte selects (only with a plate)
         ren.params["u_morph"] = 1.0 if ren.has_plate else 0.0
 
-        # BGMv2 matte (frame vs captured plate) on a worker thread; latest one
-        matter.submit(frame.copy())
+        # BGMv2 matte on a worker thread. Only pay for inference while the effect
+        # is active (or ramping) — when fully off, leave the CPU to nothing so
+        # the active path runs cooler and fresher.
+        active = target > 0.5 or level > 0.001
+        if active:
+            matter.submit(shared)
         body = matter.get()
         if body is None:
             body = np.zeros((h, w), np.float32)
         else:
-            body = keep_largest(body)
+            body = keep_significant(body)
 
         if level <= 0.001:
             mask = np.zeros((h, w), np.float32)
