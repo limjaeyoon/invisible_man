@@ -19,7 +19,7 @@ Controls:
     90        chrome amount        ,. refraction
     -=        ripple depth         ;' ripple size
     []        flow speed           kl chromatic aberration
-    fd        edge rim             m mirror   h help
+    fd        edge rim             m mirror
 """
 import time
 from pathlib import Path
@@ -92,7 +92,6 @@ def main():
     show_matte = False          # 'v' debug: view the raw RVM matte
 
     mirror = True
-    show_help = True
     recording = False
     writer = None
 
@@ -182,27 +181,6 @@ def main():
         if recording and writer is not None:
             writer.write(out)
 
-        if show_help:
-            p = ren.params
-            plate = "plate OK" if ren.has_plate else "press c (no plate)"
-            lines = [
-                f"{fps:4.1f} fps   level[{level:.2f}]   edge[{matter.thr:.2f}]   "
-                f"{plate}   {'REC' if recording else ''}",
-                f"chrome[{p['u_reflect']:.2f}]  refract[{p['u_refract']:.0f}]  "
-                f"ripple[{p['u_liquid_amp']:.2f}]  size[{p['u_liquid_scale']:.1f}]  "
-                f"flow[{p['u_flow_speed']:.2f}]  rim[{p['u_rim']:.2f}]  "
-                f"smooth[{matte_smooth:.2f}]",
-                "c plate  SPACE level  tg edge  as smooth  v matte-view  q quit  r rec  "
-                "90 chrome  ,. refract  -= ripple  ;' size  [] flow  kl chroma  fd rim  m mirror",
-            ]
-            y = 26
-            for ln in lines:
-                cv2.putText(out, ln, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                            (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(out, ln, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                            (255, 255, 255), 1, cv2.LINE_AA)
-                y += 26
-
         cv2.imshow("silverchrome", out)
         k = cv2.waitKey(1) & 0xFF
         if k in (ord("q"), 27):
@@ -226,8 +204,6 @@ def main():
             matte_smooth = min(1.0, matte_smooth + 0.05)
         elif k == ord(" "):
             target = 0.0 if target > 0.5 else 1.0
-        elif k == ord("h"):
-            show_help = not show_help
         elif k == ord("m"):
             mirror = not mirror
         elif k == ord("v"):
