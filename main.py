@@ -103,7 +103,7 @@ def main():
     target = 0.0                # where we're heading
     frame_i = 0
 
-    matte_smooth = 0.85         # temporal EMA on the matte (1.0 = off, no lag)
+    matte_smooth = 1.0          # temporal EMA on the matte (1.0 = off, no lag/trails)
     body_prev = None
 
     fps_t, fps_n, fps = time.time(), 0, 0.0

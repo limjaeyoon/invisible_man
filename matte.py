@@ -34,7 +34,7 @@ def height_from_mask(mask, blur=21):
 
 
 class RVMatte:
-    def __init__(self, scale=0.5, thr=0.45):
+    def __init__(self, scale=0.5, thr=0.55):
         try:
             import onnxruntime as ort
         except ImportError:
@@ -122,8 +122,7 @@ def keep_significant(pha, min_frac=0.0006):
     keep_ids = np.nonzero(areas >= floor)[0] + 1
     if keep_ids.size == 0:                         # everything is tiny: keep top
         keep_ids = np.array([1 + int(np.argmax(areas))])
-    keep = np.isin(lab, keep_ids).astype(np.uint8)
-    keep = cv2.dilate(keep, np.ones((5, 5), np.uint8), iterations=1).astype(np.float32)
+    keep = np.isin(lab, keep_ids).astype(np.float32)   # no dilation: keep edges tight
     return pha * keep
 
 
