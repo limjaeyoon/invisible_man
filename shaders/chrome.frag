@@ -3,15 +3,16 @@
 in vec2 v_uv;
 out vec4 frag;
 
-uniform sampler2D u_frame;    // webcam (rgb)
+uniform sampler2D u_frame;    // webcam (rgb) — the live "real you" layer
 uniform sampler2D u_plate;    // clean background plate (rgb) — room without you
-uniform sampler2D u_mask;     // person mask (r)
+uniform sampler2D u_mask;     // chrome curtain coverage (r) — where chrome shows
+uniform sampler2D u_region;   // person silhouette (r) — the whole effect region
 uniform sampler2D u_height;   // silhouette dome (r) -> overall body curvature
 uniform sampler2D u_matcap;   // chrome sphere -> the REFLECTION (environment)
 
 uniform vec2  u_texel;
 uniform float u_time;
-uniform float u_morph;        // 0 = plain you, 1 = fully invisible
+uniform float u_base_plate;   // 0 = live you under the chrome, 1 = empty-room plate
 uniform int   u_has_plate;
 uniform float u_flow_speed;   // how fast the liquid flows
 uniform float u_liquid_scale; // ripple size (bigger = finer ripples)
@@ -55,11 +56,19 @@ float surf(vec2 p, vec2 flow){
 
 void main(){
     vec2 uv = v_uv;
-    vec3 bg  = frame(uv);                 // live view (what shows when plain)
-    float m  = texture(u_mask, uv).r;
-    // contour + morph gate. lower band so ears/hair/jaw are fully covered.
-    float edge = smoothstep(0.30, 0.55, m) * u_morph;
-    if (edge < 0.004) { frag = vec4(bg, 1.0); return; }
+    vec3 live = frame(uv);                 // the live "real you" layer
+    float region = smoothstep(0.30, 0.55, texture(u_region, uv).r);
+    if (region < 0.004) { frag = vec4(live, 1.0); return; }
+
+    // the layer UNDER the chrome curtain: live you, or the empty-room plate
+    // once the swap has happened (hidden at the moment the chrome fully covers).
+    vec3 base = mix(live, texture(u_plate, clamp(uv, 0.0, 1.0)).rgb, u_base_plate);
+
+    float cover = clamp(texture(u_mask, uv).r, 0.0, 1.0);   // chrome curtain here
+    if (cover < 0.004) {                   // no chrome -> just show the base layer
+        frag = vec4(mix(live, base, region), 1.0);
+        return;
+    }
 
     vec2 flow = vec2(0.15, -1.0) * (u_time * u_flow_speed);
 
@@ -93,5 +102,7 @@ void main(){
     // specular sparkle where the surface tilts hard
     glass += smoothstep(0.6, 1.0, F) * u_rim * vec3(0.95, 0.98, 1.0);
 
-    frag = vec4(mix(bg, glass, edge), 1.0);
+    // chrome curtain over the base layer, then the whole region over the live bg
+    vec3 person = mix(base, glass, cover);
+    frag = vec4(mix(live, person, region), 1.0);
 }

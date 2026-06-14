@@ -36,9 +36,10 @@ class ChromeRenderer:
 
         # textures (filled per frame)
         self.tex_frame = self.ctx.texture((width, height), 3)
-        self.tex_mask = self.ctx.texture((width, height), 1, dtype="f4")
+        self.tex_mask = self.ctx.texture((width, height), 1, dtype="f4")    # chrome curtain
+        self.tex_region = self.ctx.texture((width, height), 1, dtype="f4")  # silhouette
         self.tex_height = self.ctx.texture((width, height), 1, dtype="f1")
-        for t in (self.tex_frame, self.tex_mask, self.tex_height):
+        for t in (self.tex_frame, self.tex_mask, self.tex_region, self.tex_height):
             t.filter = (moderngl.LINEAR, moderngl.LINEAR)
             t.repeat_x = False   # clamp so refraction doesn't wrap the edges
             t.repeat_y = False
@@ -62,6 +63,7 @@ class ChromeRenderer:
         self.prog["u_height"] = 2
         self.prog["u_matcap"] = 3
         self.prog["u_plate"] = 4
+        self.prog["u_region"] = 5
         self.prog["u_has_plate"] = 0
         self.prog["u_texel"] = (1.0 / width, 1.0 / height)
 
@@ -75,7 +77,7 @@ class ChromeRenderer:
             u_flow_speed=0.45, u_liquid_scale=9.0, u_liquid_amp=1.40,
             u_normal=0.18, u_refract=252.0, u_chroma=0.06,
             u_fresnel=2.0, u_reflect=0.0, u_rim=2.5,
-            u_morph=0.0,
+            u_base_plate=0.0,
         )
 
     def set(self, **kw):
@@ -98,9 +100,10 @@ class ChromeRenderer:
         self.tex_matcap.build_mipmaps()
         return True
 
-    def render(self, frame_rgb, mask_f, height_u8):
+    def render(self, frame_rgb, region_f, cover_f, height_u8):
         self.tex_frame.write(np.ascontiguousarray(frame_rgb, np.uint8).tobytes())
-        self.tex_mask.write(np.ascontiguousarray(mask_f, np.float32).tobytes())
+        self.tex_mask.write(np.ascontiguousarray(cover_f, np.float32).tobytes())
+        self.tex_region.write(np.ascontiguousarray(region_f, np.float32).tobytes())
         self.tex_height.write(np.ascontiguousarray(height_u8, np.uint8).tobytes())
 
         self.tex_frame.use(0)
@@ -108,6 +111,7 @@ class ChromeRenderer:
         self.tex_height.use(2)
         self.tex_matcap.use(3)
         self.tex_plate.use(4)
+        self.tex_region.use(5)
 
         for k, v in self.params.items():
             self.prog[k] = v
