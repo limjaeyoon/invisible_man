@@ -95,6 +95,12 @@ class RVMatte:
         for k in self.rec:
             self.rec[k] = np.zeros((1, 1, 1, 1), np.float32)
 
+    def set_background(self, plate_bgr):
+        """No-op: RVM segments the person directly and needs no plate. The
+        captured plate is still used elsewhere (refraction background), so the
+        app calls this uniformly across matte backends."""
+        return None
+
 
 def keep_significant(pha, min_frac=0.0006):
     """Keep the person *and* any sizeable disconnected parts, dropping only

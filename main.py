@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 
 from capture import Camera
-from matte import BGMatte, ThreadedMatte, keep_significant, height_from_mask
+from matte import RVMatte, BGMatte, ThreadedMatte, keep_significant, height_from_mask
 from chrome import ChromeRenderer
 from gesture import ThreadedPinch
 
@@ -85,7 +85,11 @@ def main():
         raise SystemExit("Webcam opened but returned no frame.")
     h, w = frame.shape[:2]
 
-    matter = ThreadedMatte(BGMatte())
+    # RobustVideoMatting segments the person directly from each frame — no
+    # background plate needed, robust at angles, and it keeps disconnected
+    # limbs (a hand entering from the side). BGMatte stays available but is
+    # fragile (needs a perfect plate) and was returning empty mattes.
+    matter = ThreadedMatte(RVMatte())
     pinch = ThreadedPinch()
     ren = ChromeRenderer(w, h, matcap="chrome")
     noise = make_noise(h, w)
@@ -139,8 +143,10 @@ def main():
         level += np.clip(target - level, -step, step)
         level = float(np.clip(level, 0.0, 1.0))
 
-        # effect is fully applied wherever the matte selects (only with a plate)
-        ren.params["u_morph"] = 1.0 if ren.has_plate else 0.0
+        # effect applies wherever the matte selects. A captured plate (c) makes
+        # the refraction truly see-through; without one it bends the live frame
+        # (wavy glass), so you still see the effect work immediately.
+        ren.params["u_morph"] = 1.0
 
         # BGMv2 matte on a worker thread. Only pay for inference while the effect
         # is active (or ramping) — when fully off, leave the CPU to nothing so
