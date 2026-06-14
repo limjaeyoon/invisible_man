@@ -87,6 +87,11 @@ class ChromeRenderer:
         self.has_plate = 1
         self.prog["u_has_plate"] = 1
 
+    def write_plate(self, frame_rgb):
+        """Update the plate pixels in place (e.g. exposure/WB-matched each frame)
+        without changing has_plate."""
+        self.tex_plate.write(np.ascontiguousarray(frame_rgb, np.uint8).tobytes())
+
     def load_matcap(self, name):
         path = ROOT / "assets" / "matcaps" / f"{name}.png"
         if not path.exists():

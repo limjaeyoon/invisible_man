@@ -64,6 +64,30 @@ def reveal_field(cov, noise):
     return np.clip((1.4 * cov - noise) / 0.4, 0.0, 1.0)
 
 
+def plate_gain_match(plate_rgb, live_rgb, body, prev):
+    """Per-channel gain that makes the captured plate match the live feed's
+    current exposure / white balance.
+
+    The webcam re-meters when you step in/out of frame, so the plate was shot at
+    a different brightness/tint than the live image — making the live->capture
+    dissolve visible. We compare the two over their SHARED background (pixels the
+    matte says aren't you) and scale the plate to match, so the swap is seamless.
+    """
+    s = (160, 90)
+    p = cv2.resize(plate_rgb, s).astype(np.float32)
+    l = cv2.resize(live_rgb, s).astype(np.float32)
+    b = cv2.resize(body, s)
+    bg = b < 0.15                                   # shared, person-free pixels
+    if bg.sum() < bg.size * 0.2:                    # too little background to trust
+        return prev
+    g = np.ones(3, np.float32)
+    for c in range(3):
+        pm = float(np.median(p[..., c][bg]))
+        lm = float(np.median(l[..., c][bg]))
+        g[c] = lm / (pm + 1.0)
+    return np.clip(g, 0.6, 1.7)
+
+
 def capture_plate(cap, mirror, n=7):
     """Average a short burst into a clean background plate.
 
@@ -118,6 +142,9 @@ def main():
     chrome_on = False           # toggle target
     tp = 0.0                    # animated progress toward chrome_on
     pending_toggle = False      # a pinch/SPACE waiting to be applied
+
+    plate_rgb0 = None           # the captured plate (rgb), before exposure matching
+    plate_gain = np.ones(3, np.float32)   # smoothed live<->plate exposure/WB match
     frame_i = 0
 
     matte_smooth = 1.0          # temporal EMA on the matte (1.0 = off, no lag/trails)
@@ -190,6 +217,15 @@ def main():
                 body = matte_smooth * body + (1.0 - matte_smooth) * body_prev
             body_prev = body
 
+        # keep the plate exposure/WB-matched to the live feed so the dissolve and
+        # the settled background read identically (no visible lighting jump).
+        if active and plate_rgb0 is not None:
+            g = plate_gain_match(plate_rgb0, frame_rgb, body, plate_gain)
+            plate_gain = 0.85 * plate_gain + 0.15 * g
+            matched = np.clip(plate_rgb0.astype(np.float32) * plate_gain,
+                              0, 255).astype(np.uint8)
+            ren.write_plate(matched)
+
         if cov <= 0.001:
             cover = np.zeros((h, w), np.float32)
         else:
@@ -218,7 +254,9 @@ def main():
             plate = capture_plate(cap, mirror)    # averaged, denoised plate
             if plate is not None:
                 matter.set_background(plate)      # BGMv2 background
-                ren.capture_plate(cv2.cvtColor(plate, cv2.COLOR_BGR2RGB))
+                plate_rgb0 = cv2.cvtColor(plate, cv2.COLOR_BGR2RGB)
+                plate_gain = np.ones(3, np.float32)
+                ren.capture_plate(plate_rgb0)
                 body_prev = None                  # drop smoothing history
                 print("background plate captured (averaged).")
             else:
