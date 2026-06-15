@@ -52,7 +52,9 @@ def make_noise(h, w, seed=7):
 CAM_INDEX = 0
 WIDTH, HEIGHT = 1280, 720
 OUT_DIR = Path(__file__).resolve().parent / "output"
-TRANSITION_SECONDS = 2.0     # chrome grows (first half) then base dissolves (second half)
+TRANSITION_SECONDS = 1.6     # total sweep time
+COVER_FRAC = 0.7             # share spent growing/lifting the chrome (the visible
+                            # part); the rest is the near-invisible base dissolve
 
 
 def reveal_field(cov, noise):
@@ -65,17 +67,20 @@ def reveal_field(cov, noise):
     return np.clip((1.4 * cov - noise) / 0.4, 0.0, 1.0)
 
 
-def grow_mask(m, px):
-    """Dilate the body mask outward by `px` pixels (feathered) so the chrome
-    fully covers the real body edge — otherwise a rim of you sits outside the
-    chrome and visibly dissolves when the base morphs to the capture. Keep `px`
+def grow_mask(m, px, feather=2.0):
+    """Grow the body mask outward by `px` pixels (fractional, feathered) so the
+    chrome fully covers the real body edge — otherwise a rim of you sits outside
+    the chrome and visibly dissolves when the base morphs to the capture. Uses a
+    distance transform so `px` can be tuned in fine (sub-pixel) steps. Keep it
     modest or the figure puffs up (Michelin man)."""
-    px = int(round(px))
-    if px <= 0:
+    if px <= 0.05:
         return m
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
-    d = cv2.dilate(m, k)
-    return cv2.GaussianBlur(d, (0, 0), max(0.6, px * 0.4))
+    binm = (m > 0.5).astype(np.uint8)
+    if not binm.any():
+        return m
+    dist_out = cv2.distanceTransform(1 - binm, cv2.DIST_L2, 3)   # 0 inside, grows out
+    wide = np.clip(1.0 - (dist_out - px) / max(0.5, feather), 0.0, 1.0)
+    return np.maximum(m, wide).astype(np.float32)
 
 
 def plate_gain_match(plate_rgb, live_rgb, body, prev):
@@ -159,7 +164,7 @@ def main():
 
     plate_rgb0 = None           # the captured plate (rgb), before exposure matching
     plate_gain = np.ones(3, np.float32)   # smoothed live<->plate exposure/WB match
-    mask_grow = 8.0             # px the chrome extends past the body (o/i to tune)
+    mask_grow = 4.0             # px the chrome extends past the body (o/i to tune, 0.1 steps)
     frame_i = 0
 
     matte_smooth = 1.0          # temporal EMA on the matte (1.0 = off, no lag/trails)
@@ -203,15 +208,17 @@ def main():
             else:
                 chrome_on = not chrome_on        # reversible mid-transition
 
-        # animate tp toward the target. Two phases, each ~half the time:
-        #   tp 0.0..0.5  chrome grows over the LIVE you   (base still live)
-        #   tp 0.5..1.0  base dissolves live -> capture   (chrome stays full)
+        # animate tp toward the target. Two phases (COVER_FRAC sets the split):
+        #   tp 0..COVER_FRAC   chrome grows over the LIVE you  (base still live)
+        #   tp COVER_FRAC..1   base dissolves live -> capture  (chrome stays full)
+        # On reverse this runs backwards: the (invisible) base dissolve undoes
+        # quickly, then the chrome lifts — so coming back doesn't stall.
         step = dt / TRANSITION_SECONDS
         tp += float(np.clip((1.0 if chrome_on else 0.0) - tp, -step, step))
         tp = float(np.clip(tp, 0.0, 1.0))
 
-        cov_t = np.clip(tp / 0.5, 0.0, 1.0)              # chrome coverage phase
-        base_t = np.clip((tp - 0.5) / 0.5, 0.0, 1.0)     # base dissolve phase
+        cov_t = np.clip(tp / COVER_FRAC, 0.0, 1.0)                       # chrome phase
+        base_t = np.clip((tp - COVER_FRAC) / (1.0 - COVER_FRAC), 0.0, 1.0)  # base phase
         cov = float(cov_t * cov_t * (3.0 - 2.0 * cov_t))         # smoothstep
         base_plate = float(base_t * base_t * (3.0 - 2.0 * base_t))
         ren.params["u_base_plate"] = base_plate
@@ -285,11 +292,11 @@ def main():
         elif k == ord("s"):                 # less smoothing (more responsive)
             matte_smooth = min(1.0, matte_smooth + 0.05)
         elif k == ord("o"):                 # chrome wider (covers body edge)
-            mask_grow = min(40.0, mask_grow + 2.0)
-            print("cover width:", mask_grow)
+            mask_grow = min(40.0, mask_grow + 0.1)
+            print("cover width: %.1f" % mask_grow)
         elif k == ord("i"):                 # chrome narrower (less puffy)
-            mask_grow = max(0.0, mask_grow - 2.0)
-            print("cover width:", mask_grow)
+            mask_grow = max(0.0, mask_grow - 0.1)
+            print("cover width: %.1f" % mask_grow)
         elif k == ord(" "):
             pending_toggle = True
         elif k == ord("m"):
