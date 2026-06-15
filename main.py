@@ -17,7 +17,7 @@ Controls:
     SPACE     toggle coverage manually (same as a pinch)
     t / g     matte edge tightness (tighter / fuller)
     a / s     matte temporal smoothing (steadier / more responsive)
-    o / i     chrome cover width (wider over body / narrower)
+    o / i     chrome peak cover width during the morph (wider / narrower)
     q / ESC   quit
     r         record on / off  (output/)
     90        chrome amount        ,. refraction
@@ -55,6 +55,9 @@ OUT_DIR = Path(__file__).resolve().parent / "output"
 TRANSITION_SECONDS = 1.6     # total sweep time
 COVER_FRAC = 0.7             # share spent growing/lifting the chrome (the visible
                             # part); the rest is the near-invisible base dissolve
+SETTLE_GROW = 0.0           # chrome width once settled (0 = hugs body; ~1 = margin)
+WIDTH_LEAD = 0.15           # start swelling this much (in tp) before the morph
+WIDTH_HOLD_END = 0.9        # hold peak width until here, then thin to SETTLE_GROW
 
 
 def reveal_field(cov, noise):
@@ -81,6 +84,27 @@ def grow_mask(m, px, feather=2.0):
     dist_out = cv2.distanceTransform(1 - binm, cv2.DIST_L2, 3)   # 0 inside, grows out
     wide = np.clip(1.0 - (dist_out - px) / max(0.5, feather), 0.0, 1.0)
     return np.maximum(m, wide).astype(np.float32)
+
+
+def width_profile(tp, peak, settle=SETTLE_GROW):
+    """Chrome cover-width over the transition: thin -> swell across the base
+    morph -> thin to `settle`. A trapezoid (with a lead-in before the morph and
+    a thin-out as it settles), eased on the ramps. Because it's a function of
+    `tp`, reverse mirrors it: the figure swells to cover the returning rim, then
+    the chrome lifts at the settled width."""
+    up0, up1 = COVER_FRAC - WIDTH_LEAD, COVER_FRAC
+    if tp <= up0:
+        b = 0.0
+    elif tp < up1:
+        b = (tp - up0) / (up1 - up0)
+    elif tp <= WIDTH_HOLD_END:
+        b = 1.0
+    elif tp < 1.0:
+        b = 1.0 - (tp - WIDTH_HOLD_END) / (1.0 - WIDTH_HOLD_END)
+    else:
+        b = 0.0
+    b = b * b * (3.0 - 2.0 * b)                      # ease the ramps
+    return settle + (peak - settle) * b
 
 
 def plate_gain_match(plate_rgb, live_rgb, body, prev):
@@ -164,7 +188,8 @@ def main():
 
     plate_rgb0 = None           # the captured plate (rgb), before exposure matching
     plate_gain = np.ones(3, np.float32)   # smoothed live<->plate exposure/WB match
-    mask_grow = 4.0             # px the chrome extends past the body (o/i to tune, 0.1 steps)
+    mask_grow = 4.0             # PEAK chrome width during the morph (o/i, 0.1 steps);
+                               # thins to SETTLE_GROW once settled
     frame_i = 0
 
     matte_smooth = 1.0          # temporal EMA on the matte (1.0 = off, no lag/trails)
@@ -251,7 +276,8 @@ def main():
         if cov <= 0.001:
             cover = np.zeros((h, w), np.float32)
         else:
-            cover = grow_mask(body, mask_grow) * reveal_field(cov, noise)
+            grow = width_profile(tp, mask_grow)      # swell across morph, thin to settle
+            cover = grow_mask(body, grow) * reveal_field(cov, noise)
         height = height_from_mask(cover)
         out_rgb = ren.render(frame_rgb, cover, height)
         out = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
