@@ -18,7 +18,11 @@ Controls:
     t / g     matte edge tightness (tighter / fuller)
     a / s     matte temporal smoothing (steadier / more responsive)
     o / i     chrome peak cover width during the morph (wider / narrower)
+    j         toggle sci-fi hand skeleton overlay
     q / ESC   quit
+
+Pinch only registers when the hand is presented (open & raised), so a
+relaxed hand resting in view won't trigger it.
     r         record on / off  (output/)
     90        chrome amount        ,. refraction
     -=        ripple depth         ;' ripple size
@@ -33,7 +37,7 @@ import numpy as np
 from capture import Camera
 from matte import SelfieMatte, RVMatte, BGMatte, ThreadedMatte, keep_significant, height_from_mask
 from chrome import ChromeRenderer
-from gesture import ThreadedPinch
+from gesture import ThreadedPinch, draw_hands
 
 
 def make_noise(h, w, seed=7):
@@ -176,6 +180,7 @@ def main():
     show_matte = False          # 'v' debug: view the raw RVM matte
 
     mirror = True
+    show_hands = True           # sci-fi hand skeleton overlay
     recording = False
     writer = None
 
@@ -282,9 +287,12 @@ def main():
         out_rgb = ren.render(frame_rgb, cover, height)
         out = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
 
-        if show_matte:                     # debug: see exactly what RVM selects
+        if show_matte:                     # debug: see exactly what the matte selects
             dbg = cv2.cvtColor((body * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
             out = cv2.addWeighted(out, 0.4, dbg, 0.6, 0)
+
+        if show_hands:                     # glowing hand skeleton over everything
+            draw_hands(out, pinch.get_hands())
 
         fps_n += 1
         if now - fps_t >= 0.5:
@@ -329,6 +337,8 @@ def main():
             mirror = not mirror
         elif k == ord("v"):
             show_matte = not show_matte
+        elif k == ord("j"):
+            show_hands = not show_hands
         elif k == ord("["):
             ren.params["u_flow_speed"] = max(0.0, ren.params["u_flow_speed"] - 0.05)
         elif k == ord("]"):

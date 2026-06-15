@@ -105,6 +105,22 @@ class PinchPress:
         return trigger
 
 
+def _finger_up(lm, mcp, pip, tip):
+    """A finger is extended-and-pointing-up when each joint sits above the last
+    (image y grows downward)."""
+    return lm[tip].y < lm[pip].y < lm[mcp].y
+
+
+def hand_presented(lm):
+    """True only for a deliberately presented hand: open and raised. We require
+    at least two of middle/ring/pinky extended upward — a pinch gesture keeps
+    those fingers up while thumb+index close, whereas a hand resting in view has
+    them curled or pointing down. This gates out accidental pinches.
+    """
+    fingers = ((9, 10, 12), (13, 14, 16), (17, 18, 20))   # middle, ring, pinky
+    return sum(_finger_up(lm, *f) for f in fingers) >= 2
+
+
 class PinchDetector:
     def __init__(self):
         if not MODEL.exists():
@@ -119,9 +135,14 @@ class PinchDetector:
         )
         self.hl = vision.HandLandmarker.create_from_options(opts)
         self.press = PinchPress()
+        self.hands = []                       # latest landmarks (for drawing)
 
     def update(self, frame_bgr, now):
-        """Detect hands; return True on a confirmed pinch-press this frame."""
+        """Detect hands; return True on a confirmed pinch-press this frame.
+
+        Only a *presented* hand (open & raised, see hand_presented) is eligible
+        to pinch, so a relaxed hand resting in view can't trigger by accident.
+        """
         h, w = frame_bgr.shape[:2]
         if w > DETECT_W:                              # cheaper detection, same ratio
             s = DETECT_W / float(w)
@@ -131,8 +152,11 @@ class PinchDetector:
         img = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         res = self.hl.detect(img)
 
+        self.hands = res.hand_landmarks or []
         best_ratio = None
-        for lm in (res.hand_landmarks or []):
+        for lm in self.hands:
+            if not hand_presented(lm):               # ignore down/relaxed hands
+                continue
             wrist = (lm[0].x * w, lm[0].y * h)
             thumb = (lm[4].x * w, lm[4].y * h)
             imcp = (lm[5].x * w, lm[5].y * h)
@@ -168,6 +192,7 @@ class ThreadedPinch:
         self._frame = None
         self._now = 0.0
         self._fired = False
+        self._hands = []
         self._run = True
         self.t = threading.Thread(target=self._loop, daemon=True)
         self.t.start()
@@ -183,6 +208,11 @@ class ThreadedPinch:
             fired, self._fired = self._fired, False
         return fired
 
+    def get_hands(self):
+        """Latest hand landmarks (list per hand of 21 normalized points)."""
+        with self._lock:
+            return self._hands
+
     def _loop(self):
         while self._run:
             with self._lock:
@@ -192,12 +222,39 @@ class ThreadedPinch:
                 time.sleep(0.003)
                 continue
             try:
-                if self.det.update(f, now):
-                    with self._lock:
+                fired = self.det.update(f, now)
+                with self._lock:
+                    if fired:
                         self._fired = True
+                    self._hands = self.det.hands
             except Exception:
                 time.sleep(0.02)
 
     def close(self):
         self._run = False
         self.det.close()
+
+
+# MediaPipe hand skeleton (21 landmarks): bones to draw between points.
+HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),            # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),            # index
+    (5, 9), (9, 10), (10, 11), (11, 12),       # middle
+    (9, 13), (13, 14), (14, 15), (15, 16),     # ring
+    (13, 17), (17, 18), (18, 19), (19, 20),    # pinky
+    (0, 17),                                   # palm base
+)
+
+
+def draw_hands(img, hands):
+    """Overlay a glowing sci-fi hand skeleton (bones + node dots) for each hand.
+    Landmarks are normalized, so they map straight onto any display size."""
+    h, w = img.shape[:2]
+    for lm in hands:
+        pts = [(int(p.x * w), int(p.y * h)) for p in lm]
+        for a, b in HAND_CONNECTIONS:               # bones: cyan glow + white core
+            cv2.line(img, pts[a], pts[b], (255, 170, 0), 6, cv2.LINE_AA)
+            cv2.line(img, pts[a], pts[b], (255, 255, 255), 1, cv2.LINE_AA)
+        for x, y in pts:                            # nodes: cyan halo + bright core
+            cv2.circle(img, (x, y), 7, (255, 200, 60), -1, cv2.LINE_AA)
+            cv2.circle(img, (x, y), 3, (255, 255, 255), -1, cv2.LINE_AA)
