@@ -3,31 +3,42 @@ silverchrome — pinch to turn invisible. Live on your webcam.
 
     python main.py
 
-How it works:
-    1. Press  c  while you are OUT of frame to capture the empty room.
+How it works (two layers):
+    1. Press  c  while you are OUT of frame to capture the empty room (required).
     2. Step back in. You look normal.
-    3. Pinch (touch thumb + index on EITHER hand) -> the invisible liquid-glass
-       coverage slowly spreads across your whole body. Pinch again to reverse.
+    3. Pinch (thumb + index on EITHER hand) -> liquid chrome grows over the real
+       you; once it covers you, the WHOLE background dissolves from live camera
+       into the empty-room capture. You stay as a chrome figure standing in the
+       captured room, so a lagging mask never exposes your real body. Pinch again
+       to dissolve the room back to live and lift the chrome.
 
 Controls:
-    c         capture background plate (do this once, out of frame)
+    c         capture background plate (do this once, out of frame; averaged)
     SPACE     toggle coverage manually (same as a pinch)
     t / g     matte edge tightness (tighter / fuller)
+    a / s     matte temporal smoothing (steadier / more responsive)
+    o / i     chrome peak cover width during the morph (wider / narrower)
+    j         toggle hand skeleton overlay (drawn under the chrome)
+    p         toggle debug perf log (render/matte/hand fps + state)
     q / ESC   quit
+
+Pinch only registers when the hand is presented (open & raised), so a
+relaxed hand resting in view won't trigger it.
     r         record on / off  (output/)
     90        chrome amount        ,. refraction
     -=        ripple depth         ;' ripple size
     []        flow speed           kl chromatic aberration
-    fd        edge rim             m mirror   h help
+    fd        edge rim             m mirror
 """
 import time
 from pathlib import Path
 import cv2
 import numpy as np
 
-from matte import BGMatte, ThreadedMatte, keep_largest, height_from_mask
+from capture import Camera
+from matte import SelfieMatte, RVMatte, BGMatte, ThreadedMatte, keep_significant, height_from_mask
 from chrome import ChromeRenderer
-from gesture import PinchDetector
+from gesture import ThreadedPinch, render_hands
 
 
 def make_noise(h, w, seed=7):
@@ -46,37 +57,153 @@ def make_noise(h, w, seed=7):
 CAM_INDEX = 0
 WIDTH, HEIGHT = 1280, 720
 OUT_DIR = Path(__file__).resolve().parent / "output"
-LEVEL_SECONDS = 1.4          # how long the coverage takes to spread in/out
+TRANSITION_SECONDS = 1.6     # total sweep time
+COVER_FRAC = 0.7             # share spent growing/lifting the chrome (the visible
+                            # part); the rest is the near-invisible base dissolve
+SETTLE_GROW = 0.0           # chrome width once settled (0 = hugs body; ~1 = margin)
+WIDTH_LEAD = 0.15           # start swelling this much (in tp) before the morph
+WIDTH_HOLD_END = 0.9        # hold peak width until here, then thin to SETTLE_GROW
+
+
+def reveal_field(cov, noise):
+    """Spatial chrome curtain for a global coverage `cov` in [0,1].
+
+    Dissolves in/out organically along the static noise field, but normalized
+    so cov=0 -> nothing and cov=1 -> fully covered everywhere. Full coverage at
+    the peak is what hides the live<->plate swap underneath.
+    """
+    return np.clip((1.4 * cov - noise) / 0.4, 0.0, 1.0)
+
+
+def grow_mask(m, px, feather=2.0):
+    """Grow the body mask outward by `px` pixels (fractional, feathered) so the
+    chrome fully covers the real body edge — otherwise a rim of you sits outside
+    the chrome and visibly dissolves when the base morphs to the capture. Uses a
+    distance transform so `px` can be tuned in fine (sub-pixel) steps. Keep it
+    modest or the figure puffs up (Michelin man)."""
+    if px <= 0.05:
+        return m
+    binm = (m > 0.5).astype(np.uint8)
+    if not binm.any():
+        return m
+    dist_out = cv2.distanceTransform(1 - binm, cv2.DIST_L2, 3)   # 0 inside, grows out
+    wide = np.clip(1.0 - (dist_out - px) / max(0.5, feather), 0.0, 1.0)
+    return np.maximum(m, wide).astype(np.float32)
+
+
+def width_profile(tp, peak, settle=SETTLE_GROW):
+    """Chrome cover-width over the transition: thin -> swell across the base
+    morph -> thin to `settle`. A trapezoid (with a lead-in before the morph and
+    a thin-out as it settles), eased on the ramps. Because it's a function of
+    `tp`, reverse mirrors it: the figure swells to cover the returning rim, then
+    the chrome lifts at the settled width."""
+    up0, up1 = COVER_FRAC - WIDTH_LEAD, COVER_FRAC
+    if tp <= up0:
+        b = 0.0
+    elif tp < up1:
+        b = (tp - up0) / (up1 - up0)
+    elif tp <= WIDTH_HOLD_END:
+        b = 1.0
+    elif tp < 1.0:
+        b = 1.0 - (tp - WIDTH_HOLD_END) / (1.0 - WIDTH_HOLD_END)
+    else:
+        b = 0.0
+    b = b * b * (3.0 - 2.0 * b)                      # ease the ramps
+    return settle + (peak - settle) * b
+
+
+def plate_gain_match(plate_rgb, live_rgb, body, prev):
+    """Per-channel gain that makes the captured plate match the live feed's
+    current exposure / white balance.
+
+    The webcam re-meters when you step in/out of frame, so the plate was shot at
+    a different brightness/tint than the live image — making the live->capture
+    dissolve visible. We compare the two over their SHARED background (pixels the
+    matte says aren't you) and scale the plate to match, so the swap is seamless.
+    """
+    s = (160, 90)
+    p = cv2.resize(plate_rgb, s).astype(np.float32)
+    l = cv2.resize(live_rgb, s).astype(np.float32)
+    b = cv2.resize(body, s)
+    bg = b < 0.15                                   # shared, person-free pixels
+    if bg.sum() < bg.size * 0.2:                    # too little background to trust
+        return prev
+    g = np.ones(3, np.float32)
+    for c in range(3):
+        pm = float(np.median(p[..., c][bg]))
+        lm = float(np.median(l[..., c][bg]))
+        g[c] = lm / (pm + 1.0)
+    return np.clip(g, 0.6, 1.7)
+
+
+def capture_plate(cap, mirror, n=7):
+    """Average a short burst into a clean background plate.
+
+    A single frame carries sensor noise, which weakens the live-vs-plate
+    contrast the matte relies on. Averaging a handful of frames denoises the
+    plate, so the person separates more cleanly and accurately.
+    """
+    acc, got = None, 0
+    deadline = time.time() + 1.0
+    while got < n and time.time() < deadline:
+        ok, f = cap.read()
+        if not ok or f is None:
+            time.sleep(0.01)
+            continue
+        if mirror:
+            f = cv2.flip(f, 1)
+        acc = f.astype(np.float32) if acc is None else acc + f
+        got += 1
+        time.sleep(0.03)                 # space the reads out for distinct frames
+    if acc is None:
+        return None
+    return (acc / got).astype(np.uint8)
 
 
 def main():
-    cap = cv2.VideoCapture(CAM_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+    cap = Camera(CAM_INDEX, WIDTH, HEIGHT)
     if not cap.isOpened():
         raise SystemExit("Could not open webcam (index %d)." % CAM_INDEX)
 
     ok, frame = cap.read()
-    if not ok:
+    if not ok or frame is None:
         raise SystemExit("Webcam opened but returned no frame.")
     h, w = frame.shape[:2]
 
-    matter = ThreadedMatte(BGMatte())
-    pinch = PinchDetector()
+    # MediaPipe Selfie Segmentation: human-only, so it ignores furniture and
+    # other objects (RVM was spilling onto them). Fast/low-latency; soft edges
+    # are fine since the chrome + captured-room base hide them. RVMatte/BGMatte
+    # stay importable as alternatives.
+    matter = ThreadedMatte(SelfieMatte())
+    pinch = ThreadedPinch()
     ren = ChromeRenderer(w, h, matcap="chrome")
     noise = make_noise(h, w)
     show_matte = False          # 'v' debug: view the raw RVM matte
 
     mirror = True
-    show_help = True
+    show_hands = True           # sci-fi hand skeleton overlay
+    debug = False               # 'p': periodic perf/state log
     recording = False
     writer = None
 
-    level = 0.0                 # current matte coverage 0..1
-    target = 0.0                # where we're heading
+    # transition state. tp in [0,1]: 0 = plain live you, 1 = settled chrome figure
+    # over the captured empty room. First half (0..0.5) grows the chrome over the
+    # live you; second half (0.5..1) dissolves the whole base live->capture.
+    chrome_on = False           # toggle target
+    tp = 0.0                    # animated progress toward chrome_on
+    pending_toggle = False      # a pinch/SPACE waiting to be applied
+
+    plate_rgb0 = None           # the captured plate (rgb), before exposure matching
+    plate_gain = np.ones(3, np.float32)   # smoothed live<->plate exposure/WB match
+    mask_grow = 4.0             # PEAK chrome width during the morph (o/i, 0.1 steps);
+                               # thins to SETTLE_GROW once settled
     frame_i = 0
 
+    matte_smooth = 1.0          # temporal EMA on the matte (1.0 = off, no lag/trails)
+    body_prev = None
+
     fps_t, fps_n, fps = time.time(), 0, 0.0
+    dbg_t, dbg_mc, dbg_pc = time.time(), 0, 0
     last = time.time()
     print(__doc__)
 
@@ -84,6 +211,10 @@ def main():
         ok, frame = cap.read()
         if not ok:
             break
+        if frame is None:                # no fresh frame yet; stay responsive
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                break
+            continue
         if mirror:
             frame = cv2.flip(frame, 1)
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -92,89 +223,147 @@ def main():
         dt = now - last
         last = now
 
-        # --- pinch press -> toggle matte-coverage target (AIRMPC detector) ---
+        # one copy shared by both worker threads (they only read it)
         frame_i += 1
-        if frame_i % 2 == 0:                 # check hands every other frame
-            if pinch.update(frame, now):
-                target = 0.0 if target > 0.5 else 1.0
+        shared = frame.copy()
 
-        # animate the coverage LEVEL toward target (slow spread in/out)
-        step = dt / LEVEL_SECONDS
-        level += np.clip(target - level, -step, step)
-        level = float(np.clip(level, 0.0, 1.0))
+        # --- pinch / SPACE -> request a transition (latched, consumed here) ---
+        # Feed the hand tracker every frame (its own thread) for lowest latency.
+        pinch.submit(shared, now)
+        if pinch.poll():
+            pending_toggle = True
 
-        # effect is fully applied wherever the matte selects (only with a plate)
-        ren.params["u_morph"] = 1.0 if ren.has_plate else 0.0
+        if pending_toggle:
+            pending_toggle = False
+            if not chrome_on and not ren.has_plate:
+                print("capture the empty room first: step out and press c.")
+            else:
+                chrome_on = not chrome_on        # reversible mid-transition
 
-        # BGMv2 matte (frame vs captured plate) on a worker thread; latest one
-        matter.submit(frame.copy())
+        # animate tp toward the target. Two phases (COVER_FRAC sets the split):
+        #   tp 0..COVER_FRAC   chrome grows over the LIVE you  (base still live)
+        #   tp COVER_FRAC..1   base dissolves live -> capture  (chrome stays full)
+        # On reverse this runs backwards: the (invisible) base dissolve undoes
+        # quickly, then the chrome lifts — so coming back doesn't stall.
+        step = dt / TRANSITION_SECONDS
+        tp += float(np.clip((1.0 if chrome_on else 0.0) - tp, -step, step))
+        tp = float(np.clip(tp, 0.0, 1.0))
+
+        cov_t = np.clip(tp / COVER_FRAC, 0.0, 1.0)                       # chrome phase
+        base_t = np.clip((tp - COVER_FRAC) / (1.0 - COVER_FRAC), 0.0, 1.0)  # base phase
+        cov = float(cov_t * cov_t * (3.0 - 2.0 * cov_t))         # smoothstep
+        base_plate = float(base_t * base_t * (3.0 - 2.0 * base_t))
+        ren.params["u_base_plate"] = base_plate
+
+        # Run the matte whenever any chrome is on screen so the figure tracks you.
+        active = tp > 0.001
+        if active:
+            matter.submit(shared)
         body = matter.get()
         if body is None:
             body = np.zeros((h, w), np.float32)
         else:
-            body = keep_largest(body)
+            body = keep_significant(body)
+            # temporal smoothing: steadies edges and stops near-threshold
+            # disconnected blobs from popping in/out. alpha=1.0 disables it.
+            if matte_smooth < 0.999 and body_prev is not None \
+                    and body_prev.shape == body.shape:
+                body = matte_smooth * body + (1.0 - matte_smooth) * body_prev
+            body_prev = body
 
-        if level <= 0.001:
-            mask = np.zeros((h, w), np.float32)
+        # keep the plate exposure/WB-matched to the live feed so the dissolve and
+        # the settled background read identically (no visible lighting jump).
+        if active and plate_rgb0 is not None:
+            g = plate_gain_match(plate_rgb0, frame_rgb, body, plate_gain)
+            plate_gain = 0.85 * plate_gain + 0.15 * g
+            matched = np.clip(plate_rgb0.astype(np.float32) * plate_gain,
+                              0, 255).astype(np.uint8)
+            ren.write_plate(matched)
+
+        if cov <= 0.001:
+            cover = np.zeros((h, w), np.float32)
         else:
-            reveal = np.clip((level - noise) / 0.18 + 0.5, 0.0, 1.0)
-            mask = body * reveal
-        height = height_from_mask(mask)
-        out_rgb = ren.render(frame_rgb, mask, height)
+            grow = width_profile(tp, mask_grow)      # swell across morph, thin to settle
+            cover = grow_mask(body, grow) * reveal_field(cov, noise)
+        height = height_from_mask(cover)
+        out_rgb = ren.render(frame_rgb, cover, height)
         out = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
 
-        if show_matte:                     # debug: see exactly what RVM selects
+        if show_matte:                     # debug: see exactly what the matte selects
             dbg = cv2.cvtColor((body * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
             out = cv2.addWeighted(out, 0.4, dbg, 0.6, 0)
+
+        if show_hands:                     # hand skeleton, part of the live layer
+            hands = pinch.get_hands()
+            if hands:
+                overlay, alpha = render_hands(h, w, hands)
+                # under the chrome (1-cover) AND gone once invisible (1-base_plate):
+                # it belongs to the live-you layer, so it dissolves with it.
+                a = (alpha.astype(np.float32) / 255.0) \
+                    * (1.0 - np.clip(cover, 0, 1)) * (1.0 - base_plate)
+                a = a[..., None]
+                out = (out.astype(np.float32) * (1 - a)
+                       + overlay.astype(np.float32) * a).astype(np.uint8)
 
         fps_n += 1
         if now - fps_t >= 0.5:
             fps = fps_n / (now - fps_t)
             fps_t, fps_n = now, 0
 
+        if debug and now - dbg_t >= 1.0:
+            iv = now - dbg_t
+            mfps = (matter.count - dbg_mc) / iv
+            pfps = (pinch.count - dbg_pc) / iv
+            state = "live" if tp <= 0.001 else ("invisible" if tp >= 0.999 else "transit")
+            print("[dbg] render %2.0ffps | matte %3.0fms %2.0ffps | hand %3.0fms %2.0ffps"
+                  " | %-8s tp=%.2f grow=%.1f thr=%.2f hands=%d"
+                  % (fps, matter.ms, mfps, pinch.ms, pfps, state, tp, mask_grow,
+                     matter.thr, len(pinch.get_hands())))
+            dbg_t, dbg_mc, dbg_pc = now, matter.count, pinch.count
+
         if recording and writer is not None:
             writer.write(out)
-
-        if show_help:
-            p = ren.params
-            plate = "plate OK" if ren.has_plate else "press c (no plate)"
-            lines = [
-                f"{fps:4.1f} fps   level[{level:.2f}]   edge[{matter.thr:.2f}]   "
-                f"{plate}   {'REC' if recording else ''}",
-                f"chrome[{p['u_reflect']:.2f}]  refract[{p['u_refract']:.0f}]  "
-                f"ripple[{p['u_liquid_amp']:.2f}]  size[{p['u_liquid_scale']:.1f}]  "
-                f"flow[{p['u_flow_speed']:.2f}]  rim[{p['u_rim']:.2f}]",
-                "c plate  SPACE level  tg edge  v matte-view  q quit  r rec  90 chrome  "
-                ",. refract  -= ripple  ;' size  [] flow  kl chroma  fd rim  m mirror",
-            ]
-            y = 26
-            for ln in lines:
-                cv2.putText(out, ln, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                            (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(out, ln, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                            (255, 255, 255), 1, cv2.LINE_AA)
-                y += 26
 
         cv2.imshow("silverchrome", out)
         k = cv2.waitKey(1) & 0xFF
         if k in (ord("q"), 27):
             break
         elif k == ord("c"):
-            matter.set_background(frame.copy())   # BGMv2 background
-            ren.capture_plate(frame_rgb)          # refraction background
-            print("background plate captured.")
+            plate = capture_plate(cap, mirror)    # averaged, denoised plate
+            if plate is not None:
+                matter.set_background(plate)      # BGMv2 background
+                plate_rgb0 = cv2.cvtColor(plate, cv2.COLOR_BGR2RGB)
+                plate_gain = np.ones(3, np.float32)
+                ren.capture_plate(plate_rgb0)
+                body_prev = None                  # drop smoothing history
+                print("background plate captured (averaged).")
+            else:
+                print("plate capture failed (no frames).")
         elif k == ord("g"):                 # looser matte edge (fuller)
             matter.thr = max(0.0, matter.thr - 0.05)
         elif k == ord("t"):                 # tighter matte edge
             matter.thr = min(0.9, matter.thr + 0.05)
+        elif k == ord("a"):                 # more temporal smoothing (steadier)
+            matte_smooth = max(0.2, matte_smooth - 0.05)
+        elif k == ord("s"):                 # less smoothing (more responsive)
+            matte_smooth = min(1.0, matte_smooth + 0.05)
+        elif k == ord("o"):                 # chrome wider (covers body edge)
+            mask_grow = min(40.0, mask_grow + 0.1)
+            print("cover width: %.1f" % mask_grow)
+        elif k == ord("i"):                 # chrome narrower (less puffy)
+            mask_grow = max(0.0, mask_grow - 0.1)
+            print("cover width: %.1f" % mask_grow)
         elif k == ord(" "):
-            target = 0.0 if target > 0.5 else 1.0
-        elif k == ord("h"):
-            show_help = not show_help
+            pending_toggle = True
         elif k == ord("m"):
             mirror = not mirror
         elif k == ord("v"):
             show_matte = not show_matte
+        elif k == ord("j"):
+            show_hands = not show_hands
+        elif k == ord("p"):
+            debug = not debug
+            print("debug logging:", "on" if debug else "off")
         elif k == ord("["):
             ren.params["u_flow_speed"] = max(0.0, ren.params["u_flow_speed"] - 0.05)
         elif k == ord("]"):
@@ -208,9 +397,10 @@ def main():
             if recording:
                 OUT_DIR.mkdir(exist_ok=True)
                 fn = OUT_DIR / time.strftime("chrome_%Y%m%d_%H%M%S.mp4")
+                rec_fps = float(round(fps)) if fps > 1.0 else 30.0
                 writer = cv2.VideoWriter(
-                    str(fn), cv2.VideoWriter_fourcc(*"mp4v"), 24.0, (w, h))
-                print("recording ->", fn)
+                    str(fn), cv2.VideoWriter_fourcc(*"mp4v"), rec_fps, (w, h))
+                print("recording ->", fn, "@ %.0f fps" % rec_fps)
             elif writer is not None:
                 writer.release()
                 writer = None

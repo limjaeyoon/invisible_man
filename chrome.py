@@ -36,7 +36,7 @@ class ChromeRenderer:
 
         # textures (filled per frame)
         self.tex_frame = self.ctx.texture((width, height), 3)
-        self.tex_mask = self.ctx.texture((width, height), 1, dtype="f4")
+        self.tex_mask = self.ctx.texture((width, height), 1, dtype="f4")    # chrome coverage
         self.tex_height = self.ctx.texture((width, height), 1, dtype="f1")
         for t in (self.tex_frame, self.tex_mask, self.tex_height):
             t.filter = (moderngl.LINEAR, moderngl.LINEAR)
@@ -75,7 +75,7 @@ class ChromeRenderer:
             u_flow_speed=0.45, u_liquid_scale=9.0, u_liquid_amp=1.40,
             u_normal=0.18, u_refract=252.0, u_chroma=0.06,
             u_fresnel=2.0, u_reflect=0.0, u_rim=2.5,
-            u_morph=0.0,
+            u_base_plate=0.0,
         )
 
     def set(self, **kw):
@@ -86,6 +86,11 @@ class ChromeRenderer:
         self.tex_plate.write(np.ascontiguousarray(frame_rgb, np.uint8).tobytes())
         self.has_plate = 1
         self.prog["u_has_plate"] = 1
+
+    def write_plate(self, frame_rgb):
+        """Update the plate pixels in place (e.g. exposure/WB-matched each frame)
+        without changing has_plate."""
+        self.tex_plate.write(np.ascontiguousarray(frame_rgb, np.uint8).tobytes())
 
     def load_matcap(self, name):
         path = ROOT / "assets" / "matcaps" / f"{name}.png"
@@ -98,9 +103,9 @@ class ChromeRenderer:
         self.tex_matcap.build_mipmaps()
         return True
 
-    def render(self, frame_rgb, mask_f, height_u8):
+    def render(self, frame_rgb, cover_f, height_u8):
         self.tex_frame.write(np.ascontiguousarray(frame_rgb, np.uint8).tobytes())
-        self.tex_mask.write(np.ascontiguousarray(mask_f, np.float32).tobytes())
+        self.tex_mask.write(np.ascontiguousarray(cover_f, np.float32).tobytes())
         self.tex_height.write(np.ascontiguousarray(height_u8, np.uint8).tobytes())
 
         self.tex_frame.use(0)

@@ -34,7 +34,7 @@ def height_from_mask(mask, blur=21):
 
 
 class RVMatte:
-    def __init__(self, scale=0.5, thr=0.45):
+    def __init__(self, scale=0.5, thr=0.55):
         try:
             import onnxruntime as ort
         except ImportError:
@@ -95,17 +95,114 @@ class RVMatte:
         for k in self.rec:
             self.rec[k] = np.zeros((1, 1, 1, 1), np.float32)
 
+    def set_background(self, plate_bgr):
+        """No-op: RVM segments the person directly and needs no plate. The
+        captured plate is still used elsewhere (refraction background), so the
+        app calls this uniformly across matte backends."""
+        return None
 
-def keep_largest(pha):
-    """Keep only the largest connected blob (the person); drop stray pieces."""
+
+SELFIE_MODEL = ROOT / "assets" / "models" / "selfie_segmenter.tflite"
+SELFIE_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
+              "selfie_segmenter/float16/latest/selfie_segmenter.tflite")
+
+
+class SelfieMatte:
+    """Human-only foreground segmentation via MediaPipe Selfie Segmentation.
+
+    Purpose-built to answer "is this pixel part of the person?", so furniture and
+    other objects are never selected — fixing matte spill onto non-human areas.
+    Fast (256px internally) and low-latency; soft edges are fine because the
+    chrome cover + captured-room base hide them.
+    """
+    def __init__(self, thr=0.6):
+        import mediapipe as mp
+        self.mp = mp
+        self._handle = None
+        self._run = self._build()
+        self.thr = float(thr)
+
+    def _build(self):
+        mp = self.mp
+        # Tasks API first (known to behave on a worker thread here), then legacy.
+        try:
+            from mediapipe.tasks import python as mpp
+            from mediapipe.tasks.python import vision
+            if not SELFIE_MODEL.exists():
+                SELFIE_MODEL.parent.mkdir(parents=True, exist_ok=True)
+                print("Downloading selfie segmenter model (~250 KB) ...")
+                urllib.request.urlretrieve(SELFIE_URL, SELFIE_MODEL)
+                print("  saved ->", SELFIE_MODEL)
+            opts = vision.ImageSegmenterOptions(
+                base_options=mpp.BaseOptions(model_asset_path=str(SELFIE_MODEL)),
+                running_mode=vision.RunningMode.IMAGE,
+                output_confidence_masks=True)
+            seg = vision.ImageSegmenter.create_from_options(opts)
+            self._handle = seg
+            print("SelfieMatte: mediapipe Tasks ImageSegmenter")
+
+            def run(frame_bgr):
+                rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                img = mp.Image(image_format=mp.ImageFormat.SRGB,
+                               data=np.ascontiguousarray(rgb))
+                return seg.segment(img).confidence_masks[0].numpy_view()
+            return run
+        except Exception as e:
+            print("Tasks selfie segmenter unavailable (", e, "); using solutions.")
+
+        ss = mp.solutions.selfie_segmentation
+        seg = ss.SelfieSegmentation(model_selection=1)
+        self._handle = seg
+        print("SelfieMatte: mediapipe.solutions SelfieSegmentation")
+
+        def run(frame_bgr):
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            return seg.process(rgb).segmentation_mask
+        return run
+
+    def alpha(self, frame_bgr):
+        H, W = frame_bgr.shape[:2]
+        m = self._run(frame_bgr)
+        if m is None:
+            return np.zeros((H, W), np.float32)
+        m = np.asarray(m, np.float32)
+        if m.ndim > 2:                                  # (H,W,1) -> (H,W)
+            m = m[..., 0]
+        m = np.clip(m, 0.0, 1.0)
+        if m.shape[:2] != (H, W):
+            m = cv2.resize(m, (W, H))
+        if self.thr > 0:                                # tighten the edge
+            m = np.clip((m - self.thr) / (1.0 - self.thr), 0.0, 1.0)
+        return m
+
+    def set_background(self, plate_bgr):
+        return None
+
+    def reset(self):
+        return None
+
+
+def keep_significant(pha, min_frac=0.0015):
+    """Keep the person *and* any sizeable disconnected parts, dropping smaller
+    spurious blobs (a stray object the matte clips onto).
+
+    The old version kept just the single largest blob, so a hand raised into a
+    head-and-shoulders shot — which reads as a separate island from the torso —
+    vanished. Here we keep every component at least `min_frac` of the frame (a
+    hand/limb clears that, small object pickups don't), preserving disconnected
+    limbs while discarding flicker and minor non-human pickups.
+    """
+    h, w = pha.shape[:2]
     b = (pha > 0.4).astype(np.uint8)
     n, lab, stats, _ = cv2.connectedComponentsWithStats(b)
     if n <= 1:
         return pha
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    largest = 1 + int(np.argmax(areas))           # the person (one blob)
-    keep = (lab == largest).astype(np.uint8)
-    keep = cv2.dilate(keep, np.ones((5, 5), np.uint8), 2).astype(np.float32)
+    areas = stats[1:, cv2.CC_STAT_AREA]           # skip label 0 (background)
+    floor = max(64.0, min_frac * h * w)
+    keep_ids = np.nonzero(areas >= floor)[0] + 1
+    if keep_ids.size == 0:                         # everything is tiny: keep top
+        keep_ids = np.array([1 + int(np.argmax(areas))])
+    keep = np.isin(lab, keep_ids).astype(np.float32)   # no dilation: keep edges tight
     return pha * keep
 
 
@@ -185,6 +282,8 @@ class ThreadedMatte:
         self.lock = threading.Lock()
         self._frame = None
         self._alpha = None
+        self.count = 0             # frames processed (debug)
+        self.ms = 0.0             # EMA inference time, ms (debug)
         self._run = True
         self.t = threading.Thread(target=self._loop, daemon=True)
         self.t.start()
@@ -210,12 +309,16 @@ class ThreadedMatte:
                 time.sleep(0.003)
                 continue
             try:
+                t0 = time.time()
                 a = self.matter.alpha(f)
+                dt = (time.time() - t0) * 1000.0
                 if not printed:
                     print("matte OK: shape", a.shape, "max", round(float(a.max()), 3))
                     printed = True
                 with self.lock:
                     self._alpha = a
+                    self.count += 1
+                    self.ms = dt if self.count == 1 else 0.9 * self.ms + 0.1 * dt
             except Exception as e:
                 if not printed:
                     import traceback
