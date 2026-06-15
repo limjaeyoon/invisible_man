@@ -102,6 +102,83 @@ class RVMatte:
         return None
 
 
+SELFIE_MODEL = ROOT / "assets" / "models" / "selfie_segmenter.tflite"
+SELFIE_URL = ("https://storage.googleapis.com/mediapipe-models/image_segmenter/"
+              "selfie_segmenter/float16/latest/selfie_segmenter.tflite")
+
+
+class SelfieMatte:
+    """Human-only foreground segmentation via MediaPipe Selfie Segmentation.
+
+    Purpose-built to answer "is this pixel part of the person?", so furniture and
+    other objects are never selected — fixing matte spill onto non-human areas.
+    Fast (256px internally) and low-latency; soft edges are fine because the
+    chrome cover + captured-room base hide them.
+    """
+    def __init__(self, thr=0.5):
+        import mediapipe as mp
+        self.mp = mp
+        self._handle = None
+        self._run = self._build()
+        self.thr = float(thr)
+
+    def _build(self):
+        mp = self.mp
+        # Tasks API first (known to behave on a worker thread here), then legacy.
+        try:
+            from mediapipe.tasks import python as mpp
+            from mediapipe.tasks.python import vision
+            if not SELFIE_MODEL.exists():
+                SELFIE_MODEL.parent.mkdir(parents=True, exist_ok=True)
+                print("Downloading selfie segmenter model (~250 KB) ...")
+                urllib.request.urlretrieve(SELFIE_URL, SELFIE_MODEL)
+                print("  saved ->", SELFIE_MODEL)
+            opts = vision.ImageSegmenterOptions(
+                base_options=mpp.BaseOptions(model_asset_path=str(SELFIE_MODEL)),
+                running_mode=vision.RunningMode.IMAGE,
+                output_confidence_masks=True)
+            seg = vision.ImageSegmenter.create_from_options(opts)
+            self._handle = seg
+            print("SelfieMatte: mediapipe Tasks ImageSegmenter")
+
+            def run(frame_bgr):
+                rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                img = mp.Image(image_format=mp.ImageFormat.SRGB,
+                               data=np.ascontiguousarray(rgb))
+                return seg.segment(img).confidence_masks[0].numpy_view()
+            return run
+        except Exception as e:
+            print("Tasks selfie segmenter unavailable (", e, "); using solutions.")
+
+        ss = mp.solutions.selfie_segmentation
+        seg = ss.SelfieSegmentation(model_selection=1)
+        self._handle = seg
+        print("SelfieMatte: mediapipe.solutions SelfieSegmentation")
+
+        def run(frame_bgr):
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            return seg.process(rgb).segmentation_mask
+        return run
+
+    def alpha(self, frame_bgr):
+        H, W = frame_bgr.shape[:2]
+        m = self._run(frame_bgr)
+        if m is None:
+            return np.zeros((H, W), np.float32)
+        m = np.clip(np.asarray(m, np.float32), 0.0, 1.0)
+        if m.shape[:2] != (H, W):
+            m = cv2.resize(m, (W, H))
+        if self.thr > 0:                                # tighten the edge
+            m = np.clip((m - self.thr) / (1.0 - self.thr), 0.0, 1.0)
+        return m
+
+    def set_background(self, plate_bgr):
+        return None
+
+    def reset(self):
+        return None
+
+
 def keep_significant(pha, min_frac=0.0006):
     """Keep the person *and* any sizeable disconnected parts, dropping only
     small speckle noise.

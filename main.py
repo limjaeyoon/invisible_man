@@ -30,7 +30,7 @@ import cv2
 import numpy as np
 
 from capture import Camera
-from matte import RVMatte, BGMatte, ThreadedMatte, keep_significant, height_from_mask
+from matte import SelfieMatte, RVMatte, BGMatte, ThreadedMatte, keep_significant, height_from_mask
 from chrome import ChromeRenderer
 from gesture import ThreadedPinch
 
@@ -122,11 +122,11 @@ def main():
         raise SystemExit("Webcam opened but returned no frame.")
     h, w = frame.shape[:2]
 
-    # RobustVideoMatting segments the person directly from each frame — no
-    # background plate needed, robust at angles, and it keeps disconnected
-    # limbs (a hand entering from the side). BGMatte stays available but is
-    # fragile (needs a perfect plate) and was returning empty mattes.
-    matter = ThreadedMatte(RVMatte())
+    # MediaPipe Selfie Segmentation: human-only, so it ignores furniture and
+    # other objects (RVM was spilling onto them). Fast/low-latency; soft edges
+    # are fine since the chrome + captured-room base hide them. RVMatte/BGMatte
+    # stay importable as alternatives.
+    matter = ThreadedMatte(SelfieMatte())
     pinch = ThreadedPinch()
     ren = ChromeRenderer(w, h, matcap="chrome")
     noise = make_noise(h, w)
