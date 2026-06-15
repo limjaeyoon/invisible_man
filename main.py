@@ -17,6 +17,7 @@ Controls:
     SPACE     toggle coverage manually (same as a pinch)
     t / g     matte edge tightness (tighter / fuller)
     a / s     matte temporal smoothing (steadier / more responsive)
+    o / i     chrome cover width (wider over body / narrower)
     q / ESC   quit
     r         record on / off  (output/)
     90        chrome amount        ,. refraction
@@ -62,6 +63,19 @@ def reveal_field(cov, noise):
     the peak is what hides the live<->plate swap underneath.
     """
     return np.clip((1.4 * cov - noise) / 0.4, 0.0, 1.0)
+
+
+def grow_mask(m, px):
+    """Dilate the body mask outward by `px` pixels (feathered) so the chrome
+    fully covers the real body edge — otherwise a rim of you sits outside the
+    chrome and visibly dissolves when the base morphs to the capture. Keep `px`
+    modest or the figure puffs up (Michelin man)."""
+    px = int(round(px))
+    if px <= 0:
+        return m
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * px + 1, 2 * px + 1))
+    d = cv2.dilate(m, k)
+    return cv2.GaussianBlur(d, (0, 0), max(0.6, px * 0.4))
 
 
 def plate_gain_match(plate_rgb, live_rgb, body, prev):
@@ -145,6 +159,7 @@ def main():
 
     plate_rgb0 = None           # the captured plate (rgb), before exposure matching
     plate_gain = np.ones(3, np.float32)   # smoothed live<->plate exposure/WB match
+    mask_grow = 8.0             # px the chrome extends past the body (o/i to tune)
     frame_i = 0
 
     matte_smooth = 1.0          # temporal EMA on the matte (1.0 = off, no lag/trails)
@@ -229,7 +244,7 @@ def main():
         if cov <= 0.001:
             cover = np.zeros((h, w), np.float32)
         else:
-            cover = body * reveal_field(cov, noise)
+            cover = grow_mask(body, mask_grow) * reveal_field(cov, noise)
         height = height_from_mask(cover)
         out_rgb = ren.render(frame_rgb, cover, height)
         out = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
@@ -269,6 +284,12 @@ def main():
             matte_smooth = max(0.2, matte_smooth - 0.05)
         elif k == ord("s"):                 # less smoothing (more responsive)
             matte_smooth = min(1.0, matte_smooth + 0.05)
+        elif k == ord("o"):                 # chrome wider (covers body edge)
+            mask_grow = min(40.0, mask_grow + 2.0)
+            print("cover width:", mask_grow)
+        elif k == ord("i"):                 # chrome narrower (less puffy)
+            mask_grow = max(0.0, mask_grow - 2.0)
+            print("cover width:", mask_grow)
         elif k == ord(" "):
             pending_toggle = True
         elif k == ord("m"):
