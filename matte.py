@@ -165,7 +165,10 @@ class SelfieMatte:
         m = self._run(frame_bgr)
         if m is None:
             return np.zeros((H, W), np.float32)
-        m = np.clip(np.asarray(m, np.float32), 0.0, 1.0)
+        m = np.asarray(m, np.float32)
+        if m.ndim > 2:                                  # (H,W,1) -> (H,W)
+            m = m[..., 0]
+        m = np.clip(m, 0.0, 1.0)
         if m.shape[:2] != (H, W):
             m = cv2.resize(m, (W, H))
         if self.thr > 0:                                # tighten the edge
