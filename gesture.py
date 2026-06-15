@@ -256,15 +256,13 @@ def render_hands(h, w, hands):
     """
     overlay = np.zeros((h, w, 3), np.uint8)
     alpha = np.zeros((h, w), np.uint8)
-    cold = (255, 224, 170)                       # icy blue-white (BGR)
+    color = (0, 0, 0)                            # single pure color (black)
     for lm in hands:
         pts = [(int(p.x * w), int(p.y * h)) for p in lm]
-        for a, b in HAND_CONNECTIONS:
-            cv2.line(overlay, pts[a], pts[b], (0, 0, 0), 2, cv2.LINE_AA)   # thin dark underlay
-            cv2.line(overlay, pts[a], pts[b], cold, 1, cv2.LINE_AA)        # crisp cold line
-            cv2.line(alpha, pts[a], pts[b], 190, 2, cv2.LINE_AA)
-        for x, y in pts:
-            cv2.circle(overlay, (x, y), 3, (0, 0, 0), -1, cv2.LINE_AA)     # small dark ring
-            cv2.circle(overlay, (x, y), 2, cold, -1, cv2.LINE_AA)          # cold node dot
-            cv2.circle(alpha, (x, y), 3, 255, -1, cv2.LINE_AA)
+        for a, b in HAND_CONNECTIONS:            # one thin, sharp line
+            cv2.line(overlay, pts[a], pts[b], color, 1, cv2.LINE_AA)
+            cv2.line(alpha, pts[a], pts[b], 255, 1, cv2.LINE_AA)
+        for x, y in pts:                         # small dot
+            cv2.circle(overlay, (x, y), 2, color, -1, cv2.LINE_AA)
+            cv2.circle(alpha, (x, y), 2, 255, -1, cv2.LINE_AA)
     return overlay, alpha
