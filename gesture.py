@@ -246,15 +246,24 @@ HAND_CONNECTIONS = (
 )
 
 
-def draw_hands(img, hands):
-    """Overlay a glowing sci-fi hand skeleton (bones + node dots) for each hand.
-    Landmarks are normalized, so they map straight onto any display size."""
-    h, w = img.shape[:2]
+def render_hands(h, w, hands):
+    """Render a minimal monochrome hand skeleton on a transparent layer.
+
+    Returns (overlay_bgr, alpha) so the caller can composite it BELOW the chrome
+    (alpha gated by chrome coverage). Style: thin white bones over a faint dark
+    underlay for legibility, small white node dots ringed in black. Landmarks are
+    normalized, so they map onto any display size.
+    """
+    overlay = np.zeros((h, w, 3), np.uint8)
+    alpha = np.zeros((h, w), np.uint8)
     for lm in hands:
         pts = [(int(p.x * w), int(p.y * h)) for p in lm]
-        for a, b in HAND_CONNECTIONS:               # bones: cyan glow + white core
-            cv2.line(img, pts[a], pts[b], (255, 170, 0), 6, cv2.LINE_AA)
-            cv2.line(img, pts[a], pts[b], (255, 255, 255), 1, cv2.LINE_AA)
-        for x, y in pts:                            # nodes: cyan halo + bright core
-            cv2.circle(img, (x, y), 7, (255, 200, 60), -1, cv2.LINE_AA)
-            cv2.circle(img, (x, y), 3, (255, 255, 255), -1, cv2.LINE_AA)
+        for a, b in HAND_CONNECTIONS:
+            cv2.line(overlay, pts[a], pts[b], (0, 0, 0), 3, cv2.LINE_AA)        # underlay
+            cv2.line(overlay, pts[a], pts[b], (255, 255, 255), 1, cv2.LINE_AA)  # thin white
+            cv2.line(alpha, pts[a], pts[b], 200, 3, cv2.LINE_AA)
+        for x, y in pts:
+            cv2.circle(overlay, (x, y), 4, (0, 0, 0), -1, cv2.LINE_AA)          # black ring
+            cv2.circle(overlay, (x, y), 3, (255, 255, 255), -1, cv2.LINE_AA)    # white dot
+            cv2.circle(alpha, (x, y), 4, 255, -1, cv2.LINE_AA)
+    return overlay, alpha

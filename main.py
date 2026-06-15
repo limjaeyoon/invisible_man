@@ -18,7 +18,7 @@ Controls:
     t / g     matte edge tightness (tighter / fuller)
     a / s     matte temporal smoothing (steadier / more responsive)
     o / i     chrome peak cover width during the morph (wider / narrower)
-    j         toggle sci-fi hand skeleton overlay
+    j         toggle hand skeleton overlay (drawn under the chrome)
     q / ESC   quit
 
 Pinch only registers when the hand is presented (open & raised), so a
@@ -37,7 +37,7 @@ import numpy as np
 from capture import Camera
 from matte import SelfieMatte, RVMatte, BGMatte, ThreadedMatte, keep_significant, height_from_mask
 from chrome import ChromeRenderer
-from gesture import ThreadedPinch, draw_hands
+from gesture import ThreadedPinch, render_hands
 
 
 def make_noise(h, w, seed=7):
@@ -291,8 +291,15 @@ def main():
             dbg = cv2.cvtColor((body * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
             out = cv2.addWeighted(out, 0.4, dbg, 0.6, 0)
 
-        if show_hands:                     # glowing hand skeleton over everything
-            draw_hands(out, pinch.get_hands())
+        if show_hands:                     # hand skeleton, but UNDER the chrome
+            hands = pinch.get_hands()
+            if hands:
+                overlay, alpha = render_hands(h, w, hands)
+                # hidden wherever the chrome covers -> fades out as it comes on
+                a = (alpha.astype(np.float32) / 255.0) * (1.0 - np.clip(cover, 0, 1))
+                a = a[..., None]
+                out = (out.astype(np.float32) * (1 - a)
+                       + overlay.astype(np.float32) * a).astype(np.uint8)
 
         fps_n += 1
         if now - fps_t >= 0.5:
