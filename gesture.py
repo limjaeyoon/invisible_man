@@ -9,10 +9,14 @@ Robustness comes from three ideas (not a fixed distance threshold):
 Uses MediaPipe Tasks HandLandmarker (works on builds without mp.solutions).
 """
 import math
+import os
 import threading
 import time
 import urllib.request
 from pathlib import Path
+
+os.environ.setdefault("GLOG_minloglevel", "2")   # quiet MediaPipe INFO/WARNING spam
+
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -38,7 +42,7 @@ COOLDOWN_SEC = 0.5
 # Hand detection is run on a downscaled frame: the pinch metric is a *ratio*
 # (thumb-index gap / hand size), so it's resolution-invariant — shrinking the
 # input only makes MediaPipe faster, it doesn't change the measurement.
-DETECT_W = 640
+DETECT_W = 480
 
 
 def ema(prev, new, alpha):
@@ -128,14 +132,19 @@ class PinchDetector:
             print("Downloading hand landmarker model ...")
             urllib.request.urlretrieve(MODEL_URL, MODEL)
             print("  saved ->", MODEL)
+        # VIDEO mode tracks landmarks between frames instead of re-running full
+        # palm detection every call -> much lower latency and smoother tracking.
         opts = vision.HandLandmarkerOptions(
             base_options=mpp.BaseOptions(model_asset_path=str(MODEL)),
             num_hands=2,
-            running_mode=vision.RunningMode.IMAGE,
+            running_mode=vision.RunningMode.VIDEO,
+            min_hand_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
         )
         self.hl = vision.HandLandmarker.create_from_options(opts)
         self.press = PinchPress()
         self.hands = []                       # latest landmarks (for drawing)
+        self._ts = 0                          # monotonic ms timestamp for VIDEO mode
 
     def update(self, frame_bgr, now):
         """Detect hands; return True on a confirmed pinch-press this frame.
@@ -150,7 +159,11 @@ class PinchDetector:
             h, w = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         img = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
-        res = self.hl.detect(img)
+        ts = int(now * 1000)
+        if ts <= self._ts:                           # must strictly increase
+            ts = self._ts + 1
+        self._ts = ts
+        res = self.hl.detect_for_video(img, ts)
 
         self.hands = res.hand_landmarks or []
         best_ratio = None
@@ -193,6 +206,8 @@ class ThreadedPinch:
         self._now = 0.0
         self._fired = False
         self._hands = []
+        self.count = 0              # frames processed (debug)
+        self.ms = 0.0              # EMA detection time, ms (debug)
         self._run = True
         self.t = threading.Thread(target=self._loop, daemon=True)
         self.t.start()
@@ -222,11 +237,15 @@ class ThreadedPinch:
                 time.sleep(0.003)
                 continue
             try:
+                t0 = time.time()
                 fired = self.det.update(f, now)
+                dt = (time.time() - t0) * 1000.0
                 with self._lock:
                     if fired:
                         self._fired = True
                     self._hands = self.det.hands
+                    self.count += 1
+                    self.ms = dt if self.count == 1 else 0.9 * self.ms + 0.1 * dt
             except Exception:
                 time.sleep(0.02)
 

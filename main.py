@@ -19,6 +19,7 @@ Controls:
     a / s     matte temporal smoothing (steadier / more responsive)
     o / i     chrome peak cover width during the morph (wider / narrower)
     j         toggle hand skeleton overlay (drawn under the chrome)
+    p         toggle debug perf log (render/matte/hand fps + state)
     q / ESC   quit
 
 Pinch only registers when the hand is presented (open & raised), so a
@@ -181,6 +182,7 @@ def main():
 
     mirror = True
     show_hands = True           # sci-fi hand skeleton overlay
+    debug = False               # 'p': periodic perf/state log
     recording = False
     writer = None
 
@@ -201,6 +203,7 @@ def main():
     body_prev = None
 
     fps_t, fps_n, fps = time.time(), 0, 0.0
+    dbg_t, dbg_mc, dbg_pc = time.time(), 0, 0
     last = time.time()
     print(__doc__)
 
@@ -225,9 +228,8 @@ def main():
         shared = frame.copy()
 
         # --- pinch / SPACE -> request a transition (latched, consumed here) ---
-        # Detection runs on a background thread (see ThreadedPinch).
-        if frame_i % 2 == 0:                 # feed hands every other frame
-            pinch.submit(shared, now)
+        # Feed the hand tracker every frame (its own thread) for lowest latency.
+        pinch.submit(shared, now)
         if pinch.poll():
             pending_toggle = True
 
@@ -308,6 +310,17 @@ def main():
             fps = fps_n / (now - fps_t)
             fps_t, fps_n = now, 0
 
+        if debug and now - dbg_t >= 1.0:
+            iv = now - dbg_t
+            mfps = (matter.count - dbg_mc) / iv
+            pfps = (pinch.count - dbg_pc) / iv
+            state = "live" if tp <= 0.001 else ("invisible" if tp >= 0.999 else "transit")
+            print("[dbg] render %2.0ffps | matte %3.0fms %2.0ffps | hand %3.0fms %2.0ffps"
+                  " | %-8s tp=%.2f grow=%.1f thr=%.2f hands=%d"
+                  % (fps, matter.ms, mfps, pinch.ms, pfps, state, tp, mask_grow,
+                     matter.thr, len(pinch.get_hands())))
+            dbg_t, dbg_mc, dbg_pc = now, matter.count, pinch.count
+
         if recording and writer is not None:
             writer.write(out)
 
@@ -348,6 +361,9 @@ def main():
             show_matte = not show_matte
         elif k == ord("j"):
             show_hands = not show_hands
+        elif k == ord("p"):
+            debug = not debug
+            print("debug logging:", "on" if debug else "off")
         elif k == ord("["):
             ren.params["u_flow_speed"] = max(0.0, ren.params["u_flow_speed"] - 0.05)
         elif k == ord("]"):

@@ -115,7 +115,7 @@ class SelfieMatte:
     Fast (256px internally) and low-latency; soft edges are fine because the
     chrome cover + captured-room base hide them.
     """
-    def __init__(self, thr=0.5):
+    def __init__(self, thr=0.6):
         import mediapipe as mp
         self.mp = mp
         self._handle = None
@@ -182,15 +182,15 @@ class SelfieMatte:
         return None
 
 
-def keep_significant(pha, min_frac=0.0006):
-    """Keep the person *and* any sizeable disconnected parts, dropping only
-    small speckle noise.
+def keep_significant(pha, min_frac=0.0015):
+    """Keep the person *and* any sizeable disconnected parts, dropping smaller
+    spurious blobs (a stray object the matte clips onto).
 
     The old version kept just the single largest blob, so a hand raised into a
     head-and-shoulders shot — which reads as a separate island from the torso —
-    vanished. Here we keep every component whose area is at least `min_frac` of
-    the frame (a hand easily clears that), which preserves limbs that aren't
-    connected in-frame while still discarding tiny matte flicker.
+    vanished. Here we keep every component at least `min_frac` of the frame (a
+    hand/limb clears that, small object pickups don't), preserving disconnected
+    limbs while discarding flicker and minor non-human pickups.
     """
     h, w = pha.shape[:2]
     b = (pha > 0.4).astype(np.uint8)
@@ -282,6 +282,8 @@ class ThreadedMatte:
         self.lock = threading.Lock()
         self._frame = None
         self._alpha = None
+        self.count = 0             # frames processed (debug)
+        self.ms = 0.0             # EMA inference time, ms (debug)
         self._run = True
         self.t = threading.Thread(target=self._loop, daemon=True)
         self.t.start()
@@ -307,12 +309,16 @@ class ThreadedMatte:
                 time.sleep(0.003)
                 continue
             try:
+                t0 = time.time()
                 a = self.matter.alpha(f)
+                dt = (time.time() - t0) * 1000.0
                 if not printed:
                     print("matte OK: shape", a.shape, "max", round(float(a.max()), 3))
                     printed = True
                 with self.lock:
                     self._alpha = a
+                    self.count += 1
+                    self.ms = dt if self.count == 1 else 0.9 * self.ms + 0.1 * dt
             except Exception as e:
                 if not printed:
                     import traceback
