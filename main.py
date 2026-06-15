@@ -291,12 +291,14 @@ def main():
             dbg = cv2.cvtColor((body * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
             out = cv2.addWeighted(out, 0.4, dbg, 0.6, 0)
 
-        if show_hands:                     # hand skeleton, but UNDER the chrome
+        if show_hands:                     # hand skeleton, part of the live layer
             hands = pinch.get_hands()
             if hands:
                 overlay, alpha = render_hands(h, w, hands)
-                # hidden wherever the chrome covers -> fades out as it comes on
-                a = (alpha.astype(np.float32) / 255.0) * (1.0 - np.clip(cover, 0, 1))
+                # under the chrome (1-cover) AND gone once invisible (1-base_plate):
+                # it belongs to the live-you layer, so it dissolves with it.
+                a = (alpha.astype(np.float32) / 255.0) \
+                    * (1.0 - np.clip(cover, 0, 1)) * (1.0 - base_plate)
                 a = a[..., None]
                 out = (out.astype(np.float32) * (1 - a)
                        + overlay.astype(np.float32) * a).astype(np.uint8)
