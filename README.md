@@ -1,4 +1,4 @@
-# silverchrome
+# INVISIBLE MAN
 
 Real-time liquid-chrome (Silver Surfer) effect. Webcam in → you become flowing reflective metal → composited over your real room.
 
