@@ -74,10 +74,14 @@ class ChromeRenderer:
         self.params = dict(
             u_flow_speed=0.45, u_liquid_scale=9.0, u_liquid_amp=1.40,
             u_normal=0.18, u_refract=252.0, u_chroma=0.06,
-            u_fresnel=2.0, u_reflect=0.0, u_rim=2.5,
-            u_base_plate=0.0,
-            # physically-based liquid (Path A)
-            u_ior=1.33, u_absorb=0.6, u_spec=0.5, u_warp=0.6,
+            u_fresnel=2.0, u_rim=2.5, u_base_plate=0.0,
+            # physically-based liquid metal (Path A) — fire defaults
+            u_reflect=0.40,     # metallic sheen (liquid chrome)
+            u_ior=2.20,         # high glass density -> strong bend
+            u_absorb=0.70,      # medium tinted depth
+            u_spec=0.85,        # medium-high wet highlight
+            u_warp=1.30,        # high flow swirl
+            u_bead=0.50,        # merging metal droplets
         )
 
     def set(self, **kw):

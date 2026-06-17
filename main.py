@@ -29,7 +29,7 @@ relaxed hand resting in view won't trigger it.
     -=        ripple depth         ;' ripple size
     []        flow speed           kl chromatic aberration
     fd        edge rim             m mirror
-    12 IOR    34 absorption        56 specular   78 flow swirl
+    12 IOR    34 absorption        56 specular   78 flow swirl   bn droplets
 """
 import time
 from pathlib import Path
@@ -409,6 +409,10 @@ def main():
             ren.params["u_warp"] = max(0.0, ren.params["u_warp"] - 0.1)
         elif k == ord("8"):
             ren.params["u_warp"] += 0.1
+        elif k == ord("b"):                 # fewer metal droplets
+            ren.params["u_bead"] = max(0.0, ren.params["u_bead"] - 0.05)
+        elif k == ord("n"):                 # more metal droplets
+            ren.params["u_bead"] += 0.05
         elif k == ord("r"):
             recording = not recording
             if recording:

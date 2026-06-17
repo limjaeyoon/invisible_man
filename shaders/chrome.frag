@@ -26,6 +26,7 @@ uniform float u_ior;          // index of refraction (water 1.33 .. glass 1.5)
 uniform float u_absorb;       // Beer-Lambert absorption (liquid tint/depth)
 uniform float u_spec;         // specular sheen (wet highlight)
 uniform float u_warp;         // flow domain-warp (swirl)
+uniform float u_bead;         // metaball droplet amount (liquid-metal beads)
 
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p){
@@ -40,6 +41,23 @@ float fbm(vec2 p){
     float v = 0.0, a = 0.6;
     for(int i=0;i<3;i++){ v += a*noise(p); p = p*1.9 + 1.7; a *= 0.5; }
     return v;
+}
+// metaball droplets: nearest animated cell point -> rounded merging blobs
+vec2 hash2(vec2 p){
+    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+    return fract(sin(p) * 43758.5453);
+}
+float worley(vec2 p, float t){
+    vec2 ip = floor(p), fp = fract(p);
+    float d = 1.0;
+    for(int j=-1;j<=1;j++)
+    for(int i=-1;i<=1;i++){
+        vec2 g = vec2(i, j);
+        vec2 o = 0.5 + 0.5 * sin(t + 6.2831 * hash2(ip + g));   // points drift
+        vec2 r = g + o - fp;
+        d = min(d, dot(r, r));
+    }
+    return sqrt(d);
 }
 float Hd(vec2 uv){ return texture(u_height, clamp(uv,0.0,1.0)).r; }
 vec3 frame(vec2 uv){ return texture(u_frame, clamp(uv,0.0,1.0)).rgb; }
@@ -58,7 +76,13 @@ float surf(vec2 p, vec2 flow){
     float liq = fbm(p * u_liquid_scale + q);
     // one gentle second layer for organic, non-repetitive motion
     liq += 0.35 * fbm(p * u_liquid_scale * 1.7 - q * 1.3);
-    return Hd(p) * 1.2 + liq * u_liquid_amp;
+    float h = Hd(p) * 1.2 + liq * u_liquid_amp;
+    // raised, merging metaball droplets -> glossy liquid-metal beading
+    if (u_bead > 0.001){
+        float d = worley(p * u_liquid_scale * 0.9 + flow * 0.4, u_time * u_flow_speed * 0.6);
+        h += u_bead * smoothstep(0.55, 0.0, d);
+    }
+    return h;
 }
 
 void main(){
