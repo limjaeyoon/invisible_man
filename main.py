@@ -3,18 +3,17 @@ silverchrome — pinch to turn invisible. Live on your webcam.
 
     python main.py
 
-How it works (two layers):
-    1. Press  c  while you are OUT of frame to capture the empty room (required).
-    2. Step back in. You look normal.
-    3. Pinch (thumb + index on EITHER hand) -> liquid chrome grows over the real
-       you; once it covers you, the WHOLE background dissolves from live camera
-       into the empty-room capture. You stay as a chrome figure standing in the
-       captured room, so a lagging mask never exposes your real body. Pinch again
-       to dissolve the room back to live and lift the chrome.
+How it works (liquid-metal morph):
+    1. (Optional) Press  c  out of frame to capture the room -> the chrome then
+       mirrors a clean empty room instead of reflecting yourself.
+    2. Pinch (thumb + index on either hand, presented) -> liquid metal erupts
+       from your pinch and floods across your body as a connected front with a
+       rolling chrome lip, until you become a mirror T-1000 figure in the room.
+    3. Pinch again to morph back. (SPACE instead = it wells up all over.)
 
 Controls:
-    c         capture background plate (do this once, out of frame; averaged)
-    SPACE     toggle coverage manually (same as a pinch)
+    c         capture room for a clean mirror reflection (optional, out of frame)
+    SPACE     morph manually (wells up all over instead of from a hand)
     t / g     matte edge tightness (tighter / fuller)
     a / s     matte temporal smoothing (steadier / more responsive)
     o / i     chrome peak cover width during the morph (wider / narrower)
@@ -29,7 +28,8 @@ relaxed hand resting in view won't trigger it.
     -=        ripple depth         ;' ripple size
     []        flow speed           kl chromatic aberration
     fd        edge rim             m mirror
-    12 IOR    34 absorption        56 specular   78 flow swirl   bn droplets
+    12 IOR    34 absorption        56 specular   78 flow swirl
+    bn droplets   yu room-reflection   90 mirror amount
 """
 import time
 from pathlib import Path
@@ -64,6 +64,7 @@ COVER_FRAC = 0.7             # share spent growing/lifting the chrome (the visib
 SETTLE_GROW = 0.0           # chrome width once settled (0 = hugs body; ~1 = margin)
 WIDTH_LEAD = 0.15           # start swelling this much (in tp) before the morph
 WIDTH_HOLD_END = 0.9        # hold peak width until here, then thin to SETTLE_GROW
+FRONT_RIDGE = 0.7           # height of the rolling liquid lip at the advancing front
 
 
 def reveal_field(cov, noise):
@@ -111,6 +112,49 @@ def width_profile(tp, peak, settle=SETTLE_GROW):
         b = 0.0
     b = b * b * (3.0 - 2.0 * b)                      # ease the ramps
     return settle + (peak - settle) * b
+
+
+def pinch_seed_points(hands, w, h):
+    """Screen-space seed(s) at each hand's thumb-index pinch point."""
+    pts = []
+    for lm in hands:
+        pts.append(((lm[4].x + lm[8].x) * 0.5 * w,
+                    (lm[4].y + lm[8].y) * 0.5 * h))
+    return pts
+
+
+def body_seed_points(body, n=8):
+    """Random points inside the body -> many fronts that well up and merge
+    (the SPACE / no-hand fallback)."""
+    ys, xs = np.where(body > 0.5)
+    if xs.size == 0:
+        return []
+    idx = np.random.choice(xs.size, size=min(n, xs.size), replace=False)
+    return list(zip(xs[idx].tolist(), ys[idx].tolist()))
+
+
+def seed_arrival(body, seeds, noise, tendril=0.18):
+    """Normalized distance from the morph seed(s), 0 at the seed -> 1 far away.
+
+    This drives a *connected advancing front* (the liquid crawls outward from
+    where it erupted) instead of random islands, so the coverage reads as a
+    morph rather than a dissolve. A little noise wiggles the front into tendrils.
+    """
+    h, w = body.shape[:2]
+    m = np.ones((h, w), np.uint8)
+    placed = False
+    for (x, y) in seeds:
+        xi, yi = int(round(x)), int(round(y))
+        if 0 <= xi < w and 0 <= yi < h:
+            m[yi, xi] = 0
+            placed = True
+    if not placed:
+        m[h // 2, w // 2] = 0
+    d = cv2.distanceTransform(m, cv2.DIST_L2, 3)
+    inside = d[body > 0.4]
+    dmax = float(inside.max()) if inside.size else float(d.max())
+    a = d / (dmax + 1e-6) + (noise - 0.5) * tendril
+    return np.clip(a, 0.0, 1.0).astype(np.float32)
 
 
 def plate_gain_match(plate_rgb, live_rgb, body, prev):
@@ -191,8 +235,10 @@ def main():
     # over the captured empty room. First half (0..0.5) grows the chrome over the
     # live you; second half (0.5..1) dissolves the whole base live->capture.
     chrome_on = False           # toggle target
-    tp = 0.0                    # animated progress toward chrome_on
+    tp = 0.0                    # animated progress toward chrome_on (front sweep)
     pending_toggle = False      # a pinch/SPACE waiting to be applied
+    morph_active = False        # has the current morph's seed been chosen?
+    seeds = []                  # screen-space origin point(s) of the liquid
 
     plate_rgb0 = None           # the captured plate (rgb), before exposure matching
     plate_gain = np.ones(3, np.float32)   # smoothed live<->plate exposure/WB match
@@ -236,24 +282,15 @@ def main():
 
         if pending_toggle:
             pending_toggle = False
-            if not chrome_on and not ren.has_plate:
-                print("capture the empty room first: step out and press c.")
-            else:
-                chrome_on = not chrome_on        # reversible mid-transition
+            chrome_on = not chrome_on            # reversible mid-morph
 
-        # animate tp toward the target. Two phases (COVER_FRAC sets the split):
-        #   tp 0..COVER_FRAC   chrome grows over the LIVE you  (base still live)
-        #   tp COVER_FRAC..1   base dissolves live -> capture  (chrome stays full)
-        # On reverse this runs backwards: the (invisible) base dissolve undoes
-        # quickly, then the chrome lifts — so coming back doesn't stall.
+        # the front sweeps 0..1 across the body; you stay a chrome figure in the
+        # live room (no background dissolve) and pinch again to morph back.
         step = dt / TRANSITION_SECONDS
         tp += float(np.clip((1.0 if chrome_on else 0.0) - tp, -step, step))
         tp = float(np.clip(tp, 0.0, 1.0))
-
-        cov_t = np.clip(tp / COVER_FRAC, 0.0, 1.0)                       # chrome phase
-        base_t = np.clip((tp - COVER_FRAC) / (1.0 - COVER_FRAC), 0.0, 1.0)  # base phase
-        cov = float(cov_t * cov_t * (3.0 - 2.0 * cov_t))         # smoothstep
-        base_plate = float(base_t * base_t * (3.0 - 2.0 * base_t))
+        front = float(tp * tp * (3.0 - 2.0 * tp))    # smoothstep front level
+        base_plate = 0.0                             # T-1000: mirror chrome over live room
         ren.params["u_base_plate"] = base_plate
 
         # Run the matte whenever any chrome is on screen so the figure tracks you.
@@ -265,15 +302,20 @@ def main():
             body = np.zeros((h, w), np.float32)
         else:
             body = keep_significant(body)
-            # temporal smoothing: steadies edges and stops near-threshold
-            # disconnected blobs from popping in/out. alpha=1.0 disables it.
             if matte_smooth < 0.999 and body_prev is not None \
                     and body_prev.shape == body.shape:
                 body = matte_smooth * body + (1.0 - matte_smooth) * body_prev
             body_prev = body
 
-        # keep the plate exposure/WB-matched to the live feed so the dissolve and
-        # the settled background read identically (no visible lighting jump).
+        # On the rising edge of a morph, pick where the liquid erupts: the pinch
+        # hand(s), or (no hand / SPACE) many points that well up across the body.
+        if chrome_on and not morph_active:
+            morph_active = True
+            seeds = pinch_seed_points(pinch.get_hands(), w, h) or body_seed_points(body, 8)
+        elif not chrome_on and tp <= 0.001:
+            morph_active = False
+
+        # keep the room reflection exposure/WB-matched to the live feed
         if active and plate_rgb0 is not None:
             g = plate_gain_match(plate_rgb0, frame_rgb, body, plate_gain)
             plate_gain = 0.85 * plate_gain + 0.15 * g
@@ -281,12 +323,19 @@ def main():
                               0, 255).astype(np.uint8)
             ren.write_plate(matched)
 
-        if cov <= 0.001:
+        if front <= 0.001:                              # no chrome
             cover = np.zeros((h, w), np.float32)
-        else:
-            grow = width_profile(tp, mask_grow)      # swell across morph, thin to settle
-            cover = grow_mask(body, grow) * reveal_field(cov, noise)
-        height = height_from_mask(cover)
+            height = np.zeros((h, w), np.uint8)
+        elif front >= 0.999:                            # fully chrome (settled)
+            cover = grow_mask(body, width_profile(tp, mask_grow))
+            height = height_from_mask(cover)
+        else:                                           # mid-morph: advancing front
+            arrival = seed_arrival(body, seeds, noise)  # connected front from the seed
+            cover = grow_mask(body, width_profile(tp, mask_grow)) * reveal_field(front, arrival)
+            height = height_from_mask(cover)
+            # rolling liquid lip: raise a ridge where the front is mid-coverage
+            ridge = np.exp(-((cover - 0.5) ** 2) / 0.045) * (FRONT_RIDGE * 255.0)
+            height = np.clip(height.astype(np.float32) + ridge, 0, 255).astype(np.uint8)
         out_rgb = ren.render(frame_rgb, cover, height)
         out = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
 
@@ -413,6 +462,10 @@ def main():
             ren.params["u_bead"] = max(0.0, ren.params["u_bead"] - 0.05)
         elif k == ord("n"):                 # more metal droplets
             ren.params["u_bead"] += 0.05
+        elif k == ord("y"):                 # less room reflection (more matcap)
+            ren.params["u_env"] = max(0.0, ren.params["u_env"] - 0.05)
+        elif k == ord("u"):                 # more room reflection (mirror)
+            ren.params["u_env"] = min(1.0, ren.params["u_env"] + 0.05)
         elif k == ord("r"):
             recording = not recording
             if recording:

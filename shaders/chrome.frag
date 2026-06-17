@@ -27,6 +27,8 @@ uniform float u_absorb;       // Beer-Lambert absorption (liquid tint/depth)
 uniform float u_spec;         // specular sheen (wet highlight)
 uniform float u_warp;         // flow domain-warp (swirl)
 uniform float u_bead;         // metaball droplet amount (liquid-metal beads)
+uniform float u_env;          // reflect the real room (0 matcap .. 1 room mirror)
+uniform float u_env_warp;     // room-reflection distortion (curved mirror)
 
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p){
@@ -130,9 +132,13 @@ void main(){
     vec3 ext = u_absorb * vec3(1.0, 0.6, 0.35);     // absorb red most -> cool tint
     refr *= exp(-ext * thick * 2.5);
 
-    // REFLECTION (matcap environment), blended by Schlick fresnel from the IOR
+    // REFLECTION: mirror chrome. Reflect the ACTUAL room (the plate) warped by
+    // the surface normal — like real mercury — blended with a matcap for the
+    // bright metallic studio streaks. Schlick fresnel from the IOR sets the mix.
     vec2 muv = vec2(n.x * 0.5 + 0.5, 0.5 - n.y * 0.5);
-    vec3 refl = texture(u_matcap, clamp(muv, 0.0, 1.0)).rgb;
+    vec3 mc = texture(u_matcap, clamp(muv, 0.0, 1.0)).rgb;
+    vec3 env = plate(uv + n.xy * u_env_warp);
+    vec3 refl = mix(mc, env * 0.9 + mc * 0.4, u_env);
     float F0 = pow((u_ior - 1.0) / (u_ior + 1.0), 2.0);
     float F = F0 + (1.0 - F0) * pow(1.0 - clamp(n.z, 0.0, 1.0), u_fresnel);
     float mix_amt = clamp(u_reflect + (1.0 - u_reflect) * F, 0.0, 1.0);
