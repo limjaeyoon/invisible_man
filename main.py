@@ -18,7 +18,8 @@ Controls:
     a / s     matte temporal smoothing (steadier / more responsive)
     o / i     chrome peak cover width during the morph (wider / narrower)
     j         toggle hand skeleton overlay (drawn under the chrome)
-    p         toggle debug perf log (render/matte/hand fps + state)
+    x         view the 3D depth map (Depth Anything) — verify it loads/looks right
+    p         toggle debug perf log (render/matte/hand/depth fps + state)
     q / ESC   quit
 
 Pinch only registers when the hand is presented (open & raised), so a
@@ -40,6 +41,7 @@ from capture import Camera
 from matte import SelfieMatte, RVMatte, BGMatte, ThreadedMatte, keep_significant, height_from_mask
 from chrome import ChromeRenderer
 from gesture import ThreadedPinch, render_hands
+from depth import ThreadedDepth, DepthEstimator
 
 
 def make_noise(h, w, seed=7):
@@ -225,6 +227,15 @@ def main():
     noise = make_noise(h, w)
     show_matte = False          # 'v' debug: view the raw RVM matte
 
+    # Path A: real 3D depth of you (Depth Anything V2). Optional — if it can't
+    # load (no model / slow onnxruntime), we run without it.
+    depther = None
+    try:
+        depther = ThreadedDepth(DepthEstimator())
+    except Exception as e:
+        print("depth unavailable (", e, "); running without 3D depth.")
+    show_depth = False          # 'x' debug: view the depth map
+
     mirror = True
     show_hands = True           # sci-fi hand skeleton overlay
     debug = False               # 'p': periodic perf/state log
@@ -250,7 +261,7 @@ def main():
     body_prev = None
 
     fps_t, fps_n, fps = time.time(), 0, 0.0
-    dbg_t, dbg_mc, dbg_pc = time.time(), 0, 0
+    dbg_t, dbg_mc, dbg_pc, dbg_dc = time.time(), 0, 0, 0
     last = time.time()
     print(__doc__)
 
@@ -297,6 +308,8 @@ def main():
         active = tp > 0.001
         if active:
             matter.submit(shared)
+        if depther is not None and (active or show_depth):
+            depther.submit(shared)
         body = matter.get()
         if body is None:
             body = np.zeros((h, w), np.float32)
@@ -343,6 +356,12 @@ def main():
             dbg = cv2.cvtColor((body * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
             out = cv2.addWeighted(out, 0.4, dbg, 0.6, 0)
 
+        if show_depth and depther is not None:   # debug: view the 3D depth map
+            dm = depther.get()
+            if dm is not None:
+                out = cv2.applyColorMap((np.clip(dm, 0, 1) * 255).astype(np.uint8),
+                                        cv2.COLORMAP_INFERNO)
+
         if show_hands:                     # hand skeleton, part of the live layer
             hands = pinch.get_hands()
             if hands:
@@ -364,12 +383,15 @@ def main():
             iv = now - dbg_t
             mfps = (matter.count - dbg_mc) / iv
             pfps = (pinch.count - dbg_pc) / iv
-            state = "live" if tp <= 0.001 else ("invisible" if tp >= 0.999 else "transit")
+            state = "live" if tp <= 0.001 else ("chrome" if tp >= 0.999 else "morph")
+            dms = depther.ms if depther is not None else 0.0
+            dfps = (depther.count - dbg_dc) / iv if depther is not None else 0.0
             print("[dbg] render %2.0ffps | matte %3.0fms %2.0ffps | hand %3.0fms %2.0ffps"
-                  " | %-8s tp=%.2f grow=%.1f thr=%.2f hands=%d"
-                  % (fps, matter.ms, mfps, pinch.ms, pfps, state, tp, mask_grow,
-                     matter.thr, len(pinch.get_hands())))
+                  " | depth %4.0fms %2.0ffps | %-6s tp=%.2f hands=%d"
+                  % (fps, matter.ms, mfps, pinch.ms, pfps, dms, dfps, state, tp,
+                     len(pinch.get_hands())))
             dbg_t, dbg_mc, dbg_pc = now, matter.count, pinch.count
+            dbg_dc = depther.count if depther is not None else 0
 
         if recording and writer is not None:
             writer.write(out)
@@ -411,6 +433,8 @@ def main():
             show_matte = not show_matte
         elif k == ord("j"):
             show_hands = not show_hands
+        elif k == ord("x"):
+            show_depth = not show_depth
         elif k == ord("p"):
             debug = not debug
             print("debug logging:", "on" if debug else "off")
@@ -484,6 +508,8 @@ def main():
         writer.release()
     matter.close()
     pinch.close()
+    if depther is not None:
+        depther.close()
     cap.release()
     cv2.destroyAllWindows()
 
