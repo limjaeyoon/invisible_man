@@ -76,6 +76,8 @@ class ChromeRenderer:
             u_normal=0.18, u_refract=252.0, u_chroma=0.06,
             u_fresnel=2.0, u_reflect=0.0, u_rim=2.5,
             u_base_plate=0.0,
+            # physically-based liquid (Path A)
+            u_ior=1.33, u_absorb=0.6, u_spec=0.5, u_warp=0.6,
         )
 
     def set(self, **kw):

@@ -29,6 +29,7 @@ relaxed hand resting in view won't trigger it.
     -=        ripple depth         ;' ripple size
     []        flow speed           kl chromatic aberration
     fd        edge rim             m mirror
+    12 IOR    34 absorption        56 specular   78 flow swirl
 """
 import time
 from pathlib import Path
@@ -392,6 +393,22 @@ def main():
             ren.params["u_rim"] = max(0.0, ren.params["u_rim"] - 0.1)
         elif k == ord("f"):
             ren.params["u_rim"] += 0.1
+        elif k == ord("1"):                 # IOR (glass density) down/up
+            ren.params["u_ior"] = max(1.0, ren.params["u_ior"] - 0.02)
+        elif k == ord("2"):
+            ren.params["u_ior"] = min(2.2, ren.params["u_ior"] + 0.02)
+        elif k == ord("3"):                 # Beer-Lambert absorption (liquid tint)
+            ren.params["u_absorb"] = max(0.0, ren.params["u_absorb"] - 0.1)
+        elif k == ord("4"):
+            ren.params["u_absorb"] += 0.1
+        elif k == ord("5"):                 # specular sheen (wet highlight)
+            ren.params["u_spec"] = max(0.0, ren.params["u_spec"] - 0.05)
+        elif k == ord("6"):
+            ren.params["u_spec"] += 0.05
+        elif k == ord("7"):                 # flow swirl (domain warp)
+            ren.params["u_warp"] = max(0.0, ren.params["u_warp"] - 0.1)
+        elif k == ord("8"):
+            ren.params["u_warp"] += 0.1
         elif k == ord("r"):
             recording = not recording
             if recording:

@@ -22,6 +22,10 @@ uniform float u_chroma;       // chromatic dispersion
 uniform float u_fresnel;      // edge falloff
 uniform float u_reflect;      // base chrome amount (0 glass .. 1 mirror)
 uniform float u_rim;          // bright bevel edge
+uniform float u_ior;          // index of refraction (water 1.33 .. glass 1.5)
+uniform float u_absorb;       // Beer-Lambert absorption (liquid tint/depth)
+uniform float u_spec;         // specular sheen (wet highlight)
+uniform float u_warp;         // flow domain-warp (swirl)
 
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p){
@@ -47,9 +51,13 @@ vec3 plate(vec2 uv){
 
 // liquid surface = body dome + animated flowing ripples
 float surf(vec2 p, vec2 flow){
-    float liq = fbm(p * u_liquid_scale + flow);
+    // domain-warped, downward-biased flow -> swirling liquid that runs down
+    vec2 w = vec2(noise(p * u_liquid_scale * 0.5 + flow),
+                  noise(p * u_liquid_scale * 0.5 + flow + 5.2)) - 0.5;
+    vec2 q = flow + w * u_warp;
+    float liq = fbm(p * u_liquid_scale + q);
     // one gentle second layer for organic, non-repetitive motion
-    liq += 0.35 * fbm(p * u_liquid_scale * 1.7 - flow * 1.3);
+    liq += 0.35 * fbm(p * u_liquid_scale * 1.7 - q * 1.3);
     return Hd(p) * 1.2 + liq * u_liquid_amp;
 }
 
@@ -77,27 +85,42 @@ void main(){
     float sy = (surf(uv + vec2(0.0,dy), flow) - surf(uv - vec2(0.0,dy), flow)) / (2.0*dy);
     vec3 n = normalize(vec3(-sx * u_normal, -sy * u_normal, 1.0));
 
-    // REFRACTION (transparent): bend the clean plate through the liquid so your
-    // real face/body never shows — only the distorted room behind you.
-    vec2 off = n.xy * u_refract * u_texel;
-    float ca = u_chroma;
-    vec3 refr = vec3(
-        plate(uv + off * (1.0 + ca)).r,
-        plate(uv + off).g,
-        plate(uv + off * (1.0 - ca)).b);
+    float thick = clamp(Hd(uv), 0.0, 1.0);          // dome height as a thickness proxy
+    vec3 V = vec3(0.0, 0.0, 1.0);                    // view dir (toward camera)
+    vec3 Ir = vec3(0.0, 0.0, -1.0);                 // incident ray into the surface
 
-    // REFLECTION (chrome): environment matcap sampled by the rippling normal
+    // REFRACTION with a real index of refraction + per-channel dispersion (a
+    // prism): the ray bends more where the liquid is thicker, splitting colour.
+    float disp = u_chroma * 0.06;
+    vec2 oR = refract(Ir, n, 1.0 / max(1.0, u_ior - disp)).xy;
+    vec2 oG = refract(Ir, n, 1.0 / u_ior).xy;
+    vec2 oB = refract(Ir, n, 1.0 / (u_ior + disp)).xy;
+    float k = u_refract * (0.4 + thick);
+    vec3 refr = vec3(
+        plate(uv + oR * k * u_texel).r,
+        plate(uv + oG * k * u_texel).g,
+        plate(uv + oB * k * u_texel).b);
+
+    // BEER-LAMBERT absorption: thicker liquid dims and cools the room behind it,
+    // so the body reads as a translucent volume rather than a flat cutout.
+    vec3 ext = u_absorb * vec3(1.0, 0.6, 0.35);     // absorb red most -> cool tint
+    refr *= exp(-ext * thick * 2.5);
+
+    // REFLECTION (matcap environment), blended by Schlick fresnel from the IOR
     vec2 muv = vec2(n.x * 0.5 + 0.5, 0.5 - n.y * 0.5);
     vec3 refl = texture(u_matcap, clamp(muv, 0.0, 1.0)).rgb;
-
-    // FRESNEL: more chrome at grazing angles, see-through facing camera
-    float F = pow(1.0 - clamp(n.z, 0.0, 1.0), u_fresnel);
+    float F0 = pow((u_ior - 1.0) / (u_ior + 1.0), 2.0);
+    float F = F0 + (1.0 - F0) * pow(1.0 - clamp(n.z, 0.0, 1.0), u_fresnel);
     float mix_amt = clamp(u_reflect + (1.0 - u_reflect) * F, 0.0, 1.0);
     vec3 glass = mix(refr, refl, mix_amt);
 
-    // specular sparkle where the surface tilts hard
+    // SPECULAR sheen (wet highlight) from a virtual key light
+    vec3 H = normalize(normalize(vec3(0.5, 0.8, 0.9)) + V);
+    glass += pow(max(dot(n, H), 0.0), 80.0) * u_spec * vec3(1.0);
+
+    // bright meniscus rim at grazing angles (surface tension edge)
     glass += smoothstep(0.6, 1.0, F) * u_rim * vec3(0.95, 0.98, 1.0);
 
-    // chrome figure composited over the base layer (live early, capture once set)
+    // liquid figure composited over the base layer (live early, capture once set)
     frag = vec4(mix(base, glass, cover), 1.0);
 }
